@@ -1,0 +1,6 @@
+#ifndef LOCAL_VL53L1_PLATFORM_WRAPPER_H
+#define LOCAL_VL53L1_PLATFORM_WRAPPER_H
+
+#include "../../STSW-IMG009/STSW-IMG009_v3.5.5/API/platform/vl53l1_platform.h"
+
+#endif /* LOCAL_VL53L1_PLATFORM_WRAPPER_H */

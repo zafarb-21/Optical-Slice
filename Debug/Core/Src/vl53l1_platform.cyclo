@@ -1,0 +1,10 @@
+../Core/Src/vl53l1_platform.c:8:16:VL53L1_PlatformAddr7	1
+../Core/Src/vl53l1_platform.c:13:8:VL53L1_WriteMulti	5
+../Core/Src/vl53l1_platform.c:29:8:VL53L1_ReadMulti	6
+../Core/Src/vl53l1_platform.c:60:8:VL53L1_WrByte	1
+../Core/Src/vl53l1_platform.c:65:8:VL53L1_WrWord	1
+../Core/Src/vl53l1_platform.c:75:8:VL53L1_WrDWord	1
+../Core/Src/vl53l1_platform.c:87:8:VL53L1_RdByte	1
+../Core/Src/vl53l1_platform.c:92:8:VL53L1_RdWord	3
+../Core/Src/vl53l1_platform.c:110:8:VL53L1_RdDWord	3
+../Core/Src/vl53l1_platform.c:131:8:VL53L1_WaitMs	2

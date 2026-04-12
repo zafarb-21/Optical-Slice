@@ -1,0 +1,15 @@
+../Core/Src/optical_slice_sensors.c:53:13:OpticalSensors_SetUpdateFlag	2
+../Core/Src/optical_slice_sensors.c:61:13:OpticalSensors_ResetFrameFlags	1
+../Core/Src/optical_slice_sensors.c:73:13:OpticalSensors_LogWonderCamDiag	12
+../Core/Src/optical_slice_sensors.c:131:13:OpticalSensors_ScanBridgeI2cBus	8
+../Core/Src/optical_slice_sensors.c:167:26:OpticalSensors_WonderCamRead	4
+../Core/Src/optical_slice_sensors.c:189:26:OpticalSensors_WonderCamWrite	4
+../Core/Src/optical_slice_sensors.c:205:26:OpticalSensors_StartWonderCam	14
+../Core/Src/optical_slice_sensors.c:291:13:OpticalSensors_ApplyWonderCamClass	5
+../Core/Src/optical_slice_sensors.c:332:26:OpticalSensors_SampleWonderCam	16
+../Core/Src/optical_slice_sensors.c:436:26:OpticalSensors_StartBh1750	2
+../Core/Src/optical_slice_sensors.c:457:26:OpticalSensors_SampleBh1750	7
+../Core/Src/optical_slice_sensors.c:509:26:OpticalSensors_SampleLaser	2
+../Core/Src/optical_slice_sensors.c:534:19:OpticalSensors_Init	3
+../Core/Src/optical_slice_sensors.c:623:19:OpticalSensors_Poll	11
+../Core/Src/optical_slice_sensors.c:712:32:OpticalSensors_GetTable	2
