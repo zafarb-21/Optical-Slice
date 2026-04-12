@@ -32,8 +32,13 @@ typedef enum
 } wondercam_diag_code_t;
 
 static optical_sensor_status_t sensor_table[OPTICAL_SENSOR_COUNT];
+static uint8_t bridge_recovery_required;
+static uint32_t last_bridge_probe_ms;
 static uint32_t last_bh1750_sample_ms;
+static uint32_t last_bh1750_good_ms;
+static uint32_t last_vl53_good_ms;
 static uint32_t last_wondercam_sample_ms;
+static uint32_t last_wondercam_good_ms;
 static uint16_t cached_ambient_lux_x10;
 static uint8_t cached_dark_detected;
 static uint16_t cached_vl53_distance_mm;
@@ -41,14 +46,23 @@ static uint8_t cached_vl53_range_status;
 static uint8_t cached_wondercam_online;
 static uint8_t cached_wondercam_class_id;
 static uint16_t cached_wondercam_conf_x10000;
+static uint8_t cached_wondercam_raw_class_id;
 static uint8_t wondercam_candidate_class_id;
 static uint16_t wondercam_candidate_conf_x10000;
 static uint8_t wondercam_candidate_streak;
+static uint8_t cached_presence_detected;
+static uint8_t cached_motion_detected;
+static uint8_t laser_last_signal_detected;
+static uint8_t laser_transition_seen;
+static uint32_t laser_state_since_ms;
+static uint32_t laser_last_transition_ms;
 #if OPTICAL_LASER_DEBUG_TOGGLE
 static uint32_t last_laser_toggle_ms;
 #endif
 static uint8_t laser_tx_state;
 static wondercam_diag_code_t wondercam_diag_code;
+static optical_runtime_config_t runtime_config;
+static optical_runtime_diag_t runtime_diag;
 
 static void OpticalSensors_SetUpdateFlag(uint32_t *update_flags, uint32_t flag)
 {
@@ -66,8 +80,177 @@ static void OpticalSensors_ResetFrameFlags(optical_slice_frame_t *frame)
                            OPTICAL_STATUS_CAMERA_PRESENT |
                            OPTICAL_STATUS_LASER_PRESENT |
                            OPTICAL_STATUS_SC18_PRESENT |
+                           OPTICAL_STATUS_MOTION_DETECTED |
+                           OPTICAL_STATUS_PACKAGE_DETECTED |
                            OPTICAL_STATUS_DARK |
-                           OPTICAL_STATUS_LASER_SIGNAL_DETECTED);
+                           OPTICAL_STATUS_LASER_SIGNAL_DETECTED |
+                           OPTICAL_STATUS_PRESENCE_DETECTED |
+                           OPTICAL_STATUS_VL53_RANGE_VALID |
+                           OPTICAL_STATUS_SNOW_HEIGHT_VALID |
+                           OPTICAL_STATUS_OBSTRUCTION_DETECTED);
+}
+
+static void OpticalSensors_RecordHealthEvent(optical_event_code_t code)
+{
+  ++runtime_diag.health_event_count;
+  runtime_diag.last_health_ms = HAL_GetTick();
+  runtime_diag.last_health_code = (uint8_t)code;
+}
+
+static void OpticalSensors_RecordFaultEvent(optical_event_code_t code)
+{
+  ++runtime_diag.fault_event_count;
+  runtime_diag.last_fault_ms = HAL_GetTick();
+  runtime_diag.last_fault_code = (uint8_t)code;
+}
+
+static void OpticalSensors_ApplyLaserProfile(optical_laser_profile_t profile)
+{
+  runtime_config.laser_profile = (uint8_t)profile;
+
+  switch (profile)
+  {
+    case OPTICAL_LASER_PROFILE_FAST:
+      runtime_config.laser_presence_assert_ms = OPTICAL_LASER_FAST_ASSERT_MS;
+      runtime_config.laser_presence_release_ms = OPTICAL_LASER_FAST_RELEASE_MS;
+      runtime_config.laser_motion_hold_ms = OPTICAL_LASER_FAST_MOTION_MS;
+      break;
+
+    case OPTICAL_LASER_PROFILE_STABLE:
+      runtime_config.laser_presence_assert_ms = OPTICAL_LASER_STABLE_ASSERT_MS;
+      runtime_config.laser_presence_release_ms = OPTICAL_LASER_STABLE_RELEASE_MS;
+      runtime_config.laser_motion_hold_ms = OPTICAL_LASER_STABLE_MOTION_MS;
+      break;
+
+    case OPTICAL_LASER_PROFILE_DEFAULT:
+    default:
+      runtime_config.laser_presence_assert_ms = OPTICAL_LASER_PRESENCE_ASSERT_MS;
+      runtime_config.laser_presence_release_ms = OPTICAL_LASER_PRESENCE_RELEASE_MS;
+      runtime_config.laser_motion_hold_ms = OPTICAL_LASER_MOTION_HOLD_MS;
+      break;
+  }
+}
+
+static uint8_t OpticalSensors_IsVl53MeasurementValid(uint16_t distance_mm, uint8_t range_status)
+{
+  return (uint8_t)((distance_mm != OPTICAL_READING_INVALID_U16) &&
+                   (range_status == OPTICAL_VL53_VALID_RANGE_STATUS));
+}
+
+static uint16_t OpticalSensors_ComputeSnowHeight(uint16_t distance_mm)
+{
+  uint16_t height_mm;
+
+  if ((runtime_config.snow_baseline_mm == OPTICAL_READING_INVALID_U16) ||
+      (distance_mm == OPTICAL_READING_INVALID_U16) ||
+      (distance_mm < OPTICAL_SNOW_OBSTRUCTION_MM))
+  {
+    return OPTICAL_READING_INVALID_U16;
+  }
+
+  if (distance_mm >= runtime_config.snow_baseline_mm)
+  {
+    return 0U;
+  }
+
+  height_mm = (uint16_t)(runtime_config.snow_baseline_mm - distance_mm);
+  if (height_mm > OPTICAL_SNOW_HEIGHT_MAX_MM)
+  {
+    height_mm = OPTICAL_SNOW_HEIGHT_MAX_MM;
+  }
+
+  return height_mm;
+}
+
+static uint8_t OpticalSensors_IsObstructionDistance(uint16_t distance_mm)
+{
+  return (uint8_t)((distance_mm != OPTICAL_READING_INVALID_U16) &&
+                   (distance_mm < OPTICAL_SNOW_OBSTRUCTION_MM));
+}
+
+static void OpticalSensors_ResetBh1750Cache(void)
+{
+  cached_ambient_lux_x10 = OPTICAL_READING_INVALID_U16;
+  cached_dark_detected = 0U;
+}
+
+static void OpticalSensors_ResetVl53Cache(void)
+{
+  cached_vl53_distance_mm = OPTICAL_READING_INVALID_U16;
+  cached_vl53_range_status = 0xFFU;
+}
+
+static void OpticalSensors_ResetWonderCamCache(void)
+{
+  cached_wondercam_online = 0U;
+  cached_wondercam_class_id = 0U;
+  cached_wondercam_conf_x10000 = 0U;
+  cached_wondercam_raw_class_id = 0U;
+  wondercam_candidate_class_id = 0U;
+  wondercam_candidate_conf_x10000 = 0U;
+  wondercam_candidate_streak = 0U;
+}
+
+static void OpticalSensors_InvalidateBridgeSensors(void)
+{
+  sensor_table[OPTICAL_SENSOR_BH1750].present = 0U;
+  sensor_table[OPTICAL_SENSOR_BH1750].initialized = 0U;
+  sensor_table[OPTICAL_SENSOR_VL53L1X].present = 0U;
+  sensor_table[OPTICAL_SENSOR_VL53L1X].initialized = 0U;
+  sensor_table[OPTICAL_SENSOR_AI_CAMERA].present = 0U;
+  sensor_table[OPTICAL_SENSOR_AI_CAMERA].initialized = 0U;
+  OpticalSensors_ResetBh1750Cache();
+  OpticalSensors_ResetVl53Cache();
+  OpticalSensors_ResetWonderCamCache();
+}
+
+static void OpticalSensors_RequestBridgeRecovery(void)
+{
+  if (bridge_recovery_required == 0U)
+  {
+    ++runtime_diag.bridge_recovery_count;
+    OpticalSensors_RecordFaultEvent(OPTICAL_EVENT_BRIDGE_RECOVERY_REQUESTED);
+  }
+
+  bridge_recovery_required = 1U;
+  sensor_table[OPTICAL_SENSOR_SC18IS604].present = 0U;
+  sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 0U;
+  OpticalSensors_InvalidateBridgeSensors();
+}
+
+static HAL_StatusTypeDef OpticalSensors_EnsureBridgeReady(uint32_t now)
+{
+  if ((bridge_recovery_required == 0U) && (SC18IS604_IsReady() != 0U))
+  {
+    sensor_table[OPTICAL_SENSOR_SC18IS604].present = 1U;
+    sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 1U;
+    return HAL_OK;
+  }
+
+  if ((last_bridge_probe_ms != 0U) &&
+      ((now - last_bridge_probe_ms) < OPTICAL_SC18_REINIT_PERIOD_MS))
+  {
+    return HAL_BUSY;
+  }
+
+  last_bridge_probe_ms = now;
+  if (SC18IS604_Init() == HAL_OK)
+  {
+    bridge_recovery_required = 0U;
+    sensor_table[OPTICAL_SENSOR_SC18IS604].present = 1U;
+    sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 1U;
+    sensor_table[OPTICAL_SENSOR_BH1750].present = 0U;
+    sensor_table[OPTICAL_SENSOR_BH1750].initialized = 0U;
+    sensor_table[OPTICAL_SENSOR_VL53L1X].present = 0U;
+    sensor_table[OPTICAL_SENSOR_VL53L1X].initialized = 0U;
+    sensor_table[OPTICAL_SENSOR_AI_CAMERA].present = 0U;
+    sensor_table[OPTICAL_SENSOR_AI_CAMERA].initialized = 0U;
+    OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_BRIDGE_RECOVERED);
+    return HAL_OK;
+  }
+
+  OpticalSensors_RequestBridgeRecovery();
+  return HAL_ERROR;
 }
 
 static void OpticalSensors_LogWonderCamDiag(wondercam_diag_code_t code, HAL_StatusTypeDef status)
@@ -79,6 +262,16 @@ static void OpticalSensors_LogWonderCamDiag(wondercam_diag_code_t code, HAL_Stat
   if (wondercam_diag_code == code)
   {
     return;
+  }
+
+  if (code == WONDERCAM_DIAG_ONLINE)
+  {
+    ++runtime_diag.wondercam_online_count;
+    OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_WONDERCAM_ONLINE);
+  }
+  else if (code != WONDERCAM_DIAG_NONE)
+  {
+    OpticalSensors_RecordFaultEvent(OPTICAL_EVENT_WONDERCAM_STALE);
   }
 
   wondercam_diag_code = code;
@@ -116,7 +309,7 @@ static void OpticalSensors_LogWonderCamDiag(wondercam_diag_code_t code, HAL_Stat
 
   length = snprintf(message,
                     sizeof(message),
-                    "WCAM | %s status=%d i2c=0x%02X(%s)\r\n",
+                    "FAULT | WCAM %s status=%d i2c=0x%02X(%s)\r\n",
                     stage,
                     status,
                     SC18IS604_GetLastI2cStatus(),
@@ -143,7 +336,7 @@ static void OpticalSensors_ScanBridgeI2cBus(void)
       found_any = 1U;
       length = snprintf(message,
                         sizeof(message),
-                        "SCAN | found 0x%02X i2c=0x%02X(%s)\r\n",
+                        "SCAN | addr=0x%02X i2c=0x%02X(%s)\r\n",
                         address,
                         SC18IS604_GetLastI2cStatus(),
                         SC18IS604_I2cStatusText(SC18IS604_GetLastI2cStatus()));
@@ -156,7 +349,7 @@ static void OpticalSensors_ScanBridgeI2cBus(void)
 
   if (found_any == 0U)
   {
-    length = snprintf(message, sizeof(message), "SCAN | no downstream I2C devices found\r\n");
+    length = snprintf(message, sizeof(message), "FAULT | SCAN no downstream I2C devices found\r\n");
     if ((length > 0) && ((size_t)length < sizeof(message)))
     {
       (void)HAL_UART_Transmit(&huart2, (uint8_t *)message, (uint16_t)length, 50U);
@@ -344,8 +537,7 @@ static HAL_StatusTypeDef OpticalSensors_SampleWonderCam(optical_slice_frame_t *f
   {
     sensor->present = 0U;
     sensor->initialized = 0U;
-    cached_wondercam_online = 0U;
-    wondercam_candidate_streak = 0U;
+    OpticalSensors_ResetWonderCamCache();
     if (previous_online != 0U)
     {
       OpticalSensors_SetUpdateFlag(update_flags, OPTICAL_SENSOR_UPDATE_WONDERCAM);
@@ -372,12 +564,23 @@ static HAL_StatusTypeDef OpticalSensors_SampleWonderCam(optical_slice_frame_t *f
 
   if (sensor->initialized == 0U)
   {
-    cached_wondercam_online = 0U;
-    return HAL_ERROR;
+    OpticalSensors_ResetWonderCamCache();
+    return HAL_BUSY;
   }
 
   if ((now - last_wondercam_sample_ms) < OPTICAL_SAMPLE_PERIOD_MS)
   {
+    if ((last_wondercam_good_ms == 0U) ||
+        ((now - last_wondercam_good_ms) > OPTICAL_WONDERCAM_STALE_MS))
+    {
+      ++runtime_diag.wondercam_stale_count;
+      OpticalSensors_RecordFaultEvent(OPTICAL_EVENT_WONDERCAM_STALE);
+      sensor->present = 0U;
+      sensor->initialized = 0U;
+      OpticalSensors_ResetWonderCamCache();
+      return HAL_BUSY;
+    }
+
     frame->camera_online = cached_wondercam_online;
     OpticalSensors_ApplyWonderCamClass(frame, cached_wondercam_class_id, cached_wondercam_conf_x10000);
     return HAL_OK;
@@ -388,8 +591,7 @@ static HAL_StatusTypeDef OpticalSensors_SampleWonderCam(optical_slice_frame_t *f
   {
     sensor->present = 0U;
     sensor->initialized = 0U;
-    cached_wondercam_online = 0U;
-    wondercam_candidate_streak = 0U;
+    OpticalSensors_ResetWonderCamCache();
     if (previous_online != 0U)
     {
       OpticalSensors_SetUpdateFlag(update_flags, OPTICAL_SENSOR_UPDATE_WONDERCAM);
@@ -401,9 +603,11 @@ static HAL_StatusTypeDef OpticalSensors_SampleWonderCam(optical_slice_frame_t *f
   sensor->present = 1U;
   cached_wondercam_online = 1U;
   frame->camera_online = 1U;
+  last_wondercam_good_ms = now;
   OpticalSensors_LogWonderCamDiag(WONDERCAM_DIAG_ONLINE, HAL_OK);
   raw_class_id = summary[1];
   conf_x10000 = (uint16_t)(((uint16_t)summary[3] << 8) | summary[2]);
+  cached_wondercam_raw_class_id = raw_class_id;
   filtered_class_id = (conf_x10000 >= OPTICAL_WONDERCAM_MIN_CONF_X10000) ? raw_class_id : 0U;
 
   if (filtered_class_id != wondercam_candidate_class_id)
@@ -466,21 +670,41 @@ static HAL_StatusTypeDef OpticalSensors_SampleBh1750(optical_slice_frame_t *fram
   {
     sensor->present = 0U;
     sensor->initialized = 0U;
+    OpticalSensors_ResetBh1750Cache();
     return HAL_ERROR;
   }
 
+  now = HAL_GetTick();
   if (sensor->initialized == 0U)
   {
+    if ((sensor->last_probe_ms != 0U) &&
+        ((now - sensor->last_probe_ms) < OPTICAL_I2C_PROBE_PERIOD_MS))
+    {
+      OpticalSensors_ResetBh1750Cache();
+      return HAL_BUSY;
+    }
+
     status = OpticalSensors_StartBh1750(sensor);
     if (status != HAL_OK)
     {
+      OpticalSensors_ResetBh1750Cache();
       return status;
     }
   }
 
-  now = HAL_GetTick();
   if ((now - last_bh1750_sample_ms) < OPTICAL_SAMPLE_PERIOD_MS)
   {
+    if ((last_bh1750_good_ms == 0U) ||
+        ((now - last_bh1750_good_ms) > OPTICAL_BH1750_STALE_MS))
+    {
+      ++runtime_diag.bh1750_stale_count;
+      OpticalSensors_RecordFaultEvent(OPTICAL_EVENT_BH1750_STALE);
+      sensor->present = 0U;
+      sensor->initialized = 0U;
+      OpticalSensors_ResetBh1750Cache();
+      return HAL_BUSY;
+    }
+
     frame->ambient_lux_x10 = cached_ambient_lux_x10;
     frame->dark_detected = cached_dark_detected;
     return HAL_OK;
@@ -491,6 +715,7 @@ static HAL_StatusTypeDef OpticalSensors_SampleBh1750(optical_slice_frame_t *fram
   {
     sensor->present = 0U;
     sensor->initialized = 0U;
+    OpticalSensors_ResetBh1750Cache();
     return status;
   }
 
@@ -498,6 +723,7 @@ static HAL_StatusTypeDef OpticalSensors_SampleBh1750(optical_slice_frame_t *fram
   measurement = (uint16_t)(((uint16_t)raw[0] << 8) | raw[1]);
   cached_ambient_lux_x10 = (uint16_t)((measurement * 10U) / 12U);
   cached_dark_detected = (uint8_t)((cached_ambient_lux_x10 <= OPTICAL_BH1750_DARK_THRESHOLD_X10) ? 1U : 0U);
+  last_bh1750_good_ms = now;
   frame->ambient_lux_x10 = cached_ambient_lux_x10;
   frame->dark_detected = cached_dark_detected;
   last_bh1750_sample_ms = now;
@@ -508,11 +734,10 @@ static HAL_StatusTypeDef OpticalSensors_SampleBh1750(optical_slice_frame_t *fram
 
 static HAL_StatusTypeDef OpticalSensors_SampleLaser(optical_slice_frame_t *frame)
 {
+  uint32_t now = HAL_GetTick();
   GPIO_PinState laser_rx_state;
 
 #if OPTICAL_LASER_DEBUG_TOGGLE
-  uint32_t now = HAL_GetTick();
-
   if ((now - last_laser_toggle_ms) >= OPTICAL_LASER_DEBUG_TOGGLE_MS)
   {
     last_laser_toggle_ms = now;
@@ -526,14 +751,45 @@ static HAL_StatusTypeDef OpticalSensors_SampleLaser(optical_slice_frame_t *frame
   laser_rx_state = HAL_GPIO_ReadPin(LASER_RX_GPIO_Port, LASER_RX_Pin);
   frame->laser_signal_detected = (uint8_t)((laser_rx_state ==
                                             ((OPTICAL_LASER_ACTIVE_STATE != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1U : 0U);
-  frame->laser_online = frame->laser_signal_detected;
+  frame->laser_online = 1U;
+
+  if (frame->laser_signal_detected != laser_last_signal_detected)
+  {
+    laser_last_signal_detected = frame->laser_signal_detected;
+    laser_state_since_ms = now;
+    laser_last_transition_ms = now;
+    laser_transition_seen = 1U;
+  }
+
+  if (frame->laser_signal_detected == 0U)
+  {
+    if ((now - laser_state_since_ms) >= runtime_config.laser_presence_assert_ms)
+    {
+      cached_presence_detected = 1U;
+    }
+  }
+  else if ((now - laser_state_since_ms) >= runtime_config.laser_presence_release_ms)
+  {
+    cached_presence_detected = 0U;
+  }
+
+  cached_motion_detected = (uint8_t)((laser_transition_seen != 0U) &&
+                                     ((now - laser_last_transition_ms) <= runtime_config.laser_motion_hold_ms));
+  frame->presence_detected = cached_presence_detected;
+  frame->motion_detected = cached_motion_detected;
 
   return HAL_OK;
 }
 
 HAL_StatusTypeDef OpticalSensors_Init(void)
 {
+  uint32_t now = HAL_GetTick();
+
   memset(sensor_table, 0, sizeof(sensor_table));
+  memset(&runtime_diag, 0, sizeof(runtime_diag));
+  memset(&runtime_config, 0, sizeof(runtime_config));
+  runtime_config.snow_baseline_mm = OPTICAL_SNOW_BASELINE_MM;
+  OpticalSensors_ApplyLaserProfile(OPTICAL_LASER_PROFILE_DEFAULT);
 
   sensor_table[OPTICAL_SENSOR_BH1750].id = OPTICAL_SENSOR_BH1750;
   sensor_table[OPTICAL_SENSOR_BH1750].name = "BH1750";
@@ -561,39 +817,48 @@ HAL_StatusTypeDef OpticalSensors_Init(void)
   sensor_table[OPTICAL_SENSOR_LASER_FRONT_END].name = "Laser Receiver via PA12";
   sensor_table[OPTICAL_SENSOR_LASER_FRONT_END].address_7bit = 0U;
 
+  bridge_recovery_required = 0U;
+  last_bridge_probe_ms = 0U;
   last_bh1750_sample_ms = 0U;
+  last_bh1750_good_ms = 0U;
+  last_vl53_good_ms = 0U;
   last_wondercam_sample_ms = 0U;
+  last_wondercam_good_ms = 0U;
 #if OPTICAL_LASER_DEBUG_TOGGLE
-  last_laser_toggle_ms = HAL_GetTick();
+  last_laser_toggle_ms = now;
 #endif
   laser_tx_state = OPTICAL_LASER_TX_DEFAULT_STATE;
-  cached_ambient_lux_x10 = 0U;
-  cached_dark_detected = 0U;
-  cached_vl53_distance_mm = OPTICAL_READING_INVALID_U16;
-  cached_vl53_range_status = 0xFFU;
-  cached_wondercam_online = 0U;
-  cached_wondercam_class_id = 0U;
-  cached_wondercam_conf_x10000 = 0U;
-  wondercam_candidate_class_id = 0U;
-  wondercam_candidate_conf_x10000 = 0U;
-  wondercam_candidate_streak = 0U;
+  OpticalSensors_ResetBh1750Cache();
+  OpticalSensors_ResetVl53Cache();
+  OpticalSensors_ResetWonderCamCache();
+  cached_presence_detected = 0U;
+  cached_motion_detected = 0U;
+  laser_transition_seen = 0U;
   wondercam_diag_code = WONDERCAM_DIAG_NONE;
 
 #if OPTICAL_ENABLE_LASER_FRONT_END
   HAL_GPIO_WritePin(LASER_TX_GPIO_Port,
                     LASER_TX_Pin,
                     (laser_tx_state != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  laser_last_signal_detected = (uint8_t)((HAL_GPIO_ReadPin(LASER_RX_GPIO_Port, LASER_RX_Pin) ==
+                                          ((OPTICAL_LASER_ACTIVE_STATE != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1U : 0U);
+  laser_state_since_ms = now;
+  laser_last_transition_ms = 0U;
 
   sensor_table[OPTICAL_SENSOR_LASER_FRONT_END].present = 1U;
   sensor_table[OPTICAL_SENSOR_LASER_FRONT_END].initialized = 1U;
 #else
   HAL_GPIO_WritePin(LASER_TX_GPIO_Port, LASER_TX_Pin, GPIO_PIN_RESET);
   laser_tx_state = 0U;
+  laser_last_signal_detected = 0U;
+  laser_state_since_ms = now;
+  laser_last_transition_ms = 0U;
 #endif
 
 #if OPTICAL_ENABLE_BH1750 || OPTICAL_ENABLE_VL53L1X || OPTICAL_ENABLE_WONDERCAM
   if (SC18IS604_Init() == HAL_OK)
   {
+    last_bridge_probe_ms = now;
     sensor_table[OPTICAL_SENSOR_SC18IS604].present = 1U;
     sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 1U;
 #if OPTICAL_ENABLE_BH1750
@@ -612,8 +877,7 @@ HAL_StatusTypeDef OpticalSensors_Init(void)
   }
   else
   {
-    sensor_table[OPTICAL_SENSOR_SC18IS604].present = 0U;
-    sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 0U;
+    OpticalSensors_RequestBridgeRecovery();
   }
 #endif
 
@@ -622,6 +886,10 @@ HAL_StatusTypeDef OpticalSensors_Init(void)
 
 HAL_StatusTypeDef OpticalSensors_Poll(optical_slice_frame_t *frame, uint32_t *update_flags)
 {
+  HAL_StatusTypeDef bridge_status;
+  optical_sensor_status_t *vl53_sensor = &sensor_table[OPTICAL_SENSOR_VL53L1X];
+  uint32_t now = HAL_GetTick();
+
   if (update_flags != NULL)
   {
     *update_flags = OPTICAL_SENSOR_UPDATE_NONE;
@@ -629,28 +897,35 @@ HAL_StatusTypeDef OpticalSensors_Poll(optical_slice_frame_t *frame, uint32_t *up
 
   OpticalSensors_ResetFrameFlags(frame);
 
-  frame->timestamp_ms = HAL_GetTick();
+  frame->timestamp_ms = now;
   frame->object_distance_mm = cached_vl53_distance_mm;
   frame->tof_range_status = cached_vl53_range_status;
   frame->snow_height_mm = OPTICAL_READING_INVALID_U16;
   frame->precipitation_level_x10 = OPTICAL_READING_INVALID_U16;
   frame->ambient_lux_x10 = cached_ambient_lux_x10;
   frame->precipitation_type = OPTICAL_PRECIP_UNKNOWN;
-  frame->motion_detected = 0U;
+  frame->motion_detected = cached_motion_detected;
   frame->package_detected = 0U;
+  frame->presence_detected = cached_presence_detected;
   frame->dark_detected = cached_dark_detected;
   frame->camera_online = cached_wondercam_online;
   frame->laser_online = 0U;
   frame->laser_signal_detected = 0U;
 
-  if (SC18IS604_IsReady() != 0U)
+  bridge_status = OpticalSensors_EnsureBridgeReady(now);
+  if (bridge_status == HAL_OK)
   {
     frame->status_flags |= OPTICAL_STATUS_SC18_PRESENT;
     sensor_table[OPTICAL_SENSOR_SC18IS604].present = 1U;
   }
+  else
+  {
+    sensor_table[OPTICAL_SENSOR_SC18IS604].present = 0U;
+    sensor_table[OPTICAL_SENSOR_SC18IS604].initialized = 0U;
+  }
 
 #if OPTICAL_ENABLE_VL53L1X
-  if (VL53L1XBridge_GetInfo()->present != 0U)
+  if ((bridge_status == HAL_OK) && (VL53L1XBridge_GetInfo()->present != 0U))
   {
     frame->status_flags |= OPTICAL_STATUS_VL53L1X_PRESENT;
     sensor_table[OPTICAL_SENSOR_VL53L1X].present = 1U;
@@ -658,14 +933,16 @@ HAL_StatusTypeDef OpticalSensors_Poll(optical_slice_frame_t *frame, uint32_t *up
 #endif
 
 #if OPTICAL_ENABLE_BH1750
-  if (OpticalSensors_SampleBh1750(frame, update_flags) == HAL_OK)
+  if ((bridge_status == HAL_OK) &&
+      (OpticalSensors_SampleBh1750(frame, update_flags) == HAL_OK))
   {
     frame->status_flags |= OPTICAL_STATUS_BH1750_PRESENT | OPTICAL_STATUS_BH1750_VALID;
   }
 #endif
 
 #if OPTICAL_ENABLE_WONDERCAM
-  if (OpticalSensors_SampleWonderCam(frame, update_flags) == HAL_OK)
+  if ((bridge_status == HAL_OK) &&
+      (OpticalSensors_SampleWonderCam(frame, update_flags) == HAL_OK))
   {
     frame->status_flags |= OPTICAL_STATUS_CAMERA_PRESENT;
   }
@@ -693,17 +970,89 @@ HAL_StatusTypeDef OpticalSensors_Poll(optical_slice_frame_t *frame, uint32_t *up
 #endif
 
 #if OPTICAL_ENABLE_VL53L1X
-  if (VL53L1XBridge_Poll(&cached_vl53_distance_mm, &cached_vl53_range_status) == HAL_OK)
+  if (bridge_status == HAL_OK)
   {
+    if (vl53_sensor->initialized == 0U)
+    {
+      if ((vl53_sensor->last_probe_ms == 0U) ||
+          ((now - vl53_sensor->last_probe_ms) >= OPTICAL_I2C_PROBE_PERIOD_MS))
+      {
+        vl53_sensor->last_probe_ms = now;
+        if (VL53L1XBridge_Init() == HAL_OK)
+        {
+          vl53_sensor->present = 1U;
+          vl53_sensor->initialized = 1U;
+        }
+      }
+    }
+
+    if (vl53_sensor->initialized != 0U)
+    {
+      if (VL53L1XBridge_Poll(&cached_vl53_distance_mm, &cached_vl53_range_status) == HAL_OK)
+      {
+        last_vl53_good_ms = now;
+        frame->object_distance_mm = cached_vl53_distance_mm;
+        frame->tof_range_status = cached_vl53_range_status;
+        OpticalSensors_SetUpdateFlag(update_flags, OPTICAL_SENSOR_UPDATE_VL53L1X);
+      }
+      else if ((last_vl53_good_ms == 0U) ||
+               ((now - last_vl53_good_ms) > OPTICAL_VL53_STALE_MS))
+      {
+        ++runtime_diag.vl53_stale_count;
+        OpticalSensors_RecordFaultEvent(OPTICAL_EVENT_VL53_STALE);
+        OpticalSensors_ResetVl53Cache();
+        frame->object_distance_mm = cached_vl53_distance_mm;
+        frame->tof_range_status = cached_vl53_range_status;
+        vl53_sensor->initialized = 0U;
+        vl53_sensor->present = 0U;
+      }
+    }
+    else
+    {
+      OpticalSensors_ResetVl53Cache();
+      frame->object_distance_mm = cached_vl53_distance_mm;
+      frame->tof_range_status = cached_vl53_range_status;
+    }
+  }
+  else
+  {
+    OpticalSensors_ResetVl53Cache();
     frame->object_distance_mm = cached_vl53_distance_mm;
     frame->tof_range_status = cached_vl53_range_status;
-    OpticalSensors_SetUpdateFlag(update_flags, OPTICAL_SENSOR_UPDATE_VL53L1X);
   }
 #endif
+
+  if (OpticalSensors_IsVl53MeasurementValid(frame->object_distance_mm, frame->tof_range_status) != 0U)
+  {
+    frame->status_flags |= OPTICAL_STATUS_VL53_RANGE_VALID;
+
+    if (OpticalSensors_IsObstructionDistance(frame->object_distance_mm) != 0U)
+    {
+      frame->status_flags |= OPTICAL_STATUS_OBSTRUCTION_DETECTED;
+    }
+    else
+    {
+      frame->snow_height_mm = OpticalSensors_ComputeSnowHeight(frame->object_distance_mm);
+      if (frame->snow_height_mm != OPTICAL_READING_INVALID_U16)
+      {
+        frame->status_flags |= OPTICAL_STATUS_SNOW_HEIGHT_VALID;
+      }
+    }
+  }
 
   if (frame->package_detected != 0U)
   {
     frame->status_flags |= OPTICAL_STATUS_PACKAGE_DETECTED;
+  }
+
+  if (frame->presence_detected != 0U)
+  {
+    frame->status_flags |= OPTICAL_STATUS_PRESENCE_DETECTED;
+  }
+
+  if (frame->motion_detected != 0U)
+  {
+    frame->status_flags |= OPTICAL_STATUS_MOTION_DETECTED;
   }
 
   return HAL_OK;
@@ -717,4 +1066,115 @@ const optical_sensor_status_t *OpticalSensors_GetTable(uint8_t *count)
   }
 
   return sensor_table;
+}
+
+void OpticalSensors_GetRuntimeConfig(optical_runtime_config_t *config)
+{
+  if (config == NULL)
+  {
+    return;
+  }
+
+  *config = runtime_config;
+}
+
+void OpticalSensors_GetDiagnostics(optical_runtime_diag_t *diag)
+{
+  if (diag == NULL)
+  {
+    return;
+  }
+
+  *diag = runtime_diag;
+  diag->wondercam_conf_x10000 = cached_wondercam_conf_x10000;
+  diag->wondercam_raw_class_id = cached_wondercam_raw_class_id;
+  diag->wondercam_filtered_class_id = cached_wondercam_class_id;
+  diag->wondercam_candidate_streak = wondercam_candidate_streak;
+}
+
+uint8_t OpticalSensors_HasSnowBaseline(void)
+{
+  return (uint8_t)(runtime_config.snow_baseline_mm != OPTICAL_READING_INVALID_U16);
+}
+
+uint16_t OpticalSensors_GetSnowBaselineMm(void)
+{
+  return runtime_config.snow_baseline_mm;
+}
+
+HAL_StatusTypeDef OpticalSensors_CaptureSnowBaseline(void)
+{
+  if (OpticalSensors_IsVl53MeasurementValid(cached_vl53_distance_mm, cached_vl53_range_status) == 0U)
+  {
+    return HAL_BUSY;
+  }
+
+  runtime_config.snow_baseline_mm = cached_vl53_distance_mm;
+  OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_BASELINE_CAPTURED);
+  return HAL_OK;
+}
+
+void OpticalSensors_ClearSnowBaseline(void)
+{
+  runtime_config.snow_baseline_mm = OPTICAL_READING_INVALID_U16;
+  OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_BASELINE_CLEARED);
+}
+
+HAL_StatusTypeDef OpticalSensors_SetLaserProfile(optical_laser_profile_t profile)
+{
+  switch (profile)
+  {
+    case OPTICAL_LASER_PROFILE_DEFAULT:
+      OpticalSensors_ApplyLaserProfile(profile);
+      OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_LASER_PROFILE_DEFAULT);
+      return HAL_OK;
+
+    case OPTICAL_LASER_PROFILE_FAST:
+      OpticalSensors_ApplyLaserProfile(profile);
+      OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_LASER_PROFILE_FAST);
+      return HAL_OK;
+
+    case OPTICAL_LASER_PROFILE_STABLE:
+      OpticalSensors_ApplyLaserProfile(profile);
+      OpticalSensors_RecordHealthEvent(OPTICAL_EVENT_LASER_PROFILE_STABLE);
+      return HAL_OK;
+
+    default:
+      return HAL_ERROR;
+  }
+}
+
+const char *OpticalSensors_GetLaserProfileName(uint8_t profile)
+{
+  switch ((optical_laser_profile_t)profile)
+  {
+    case OPTICAL_LASER_PROFILE_FAST:
+      return "fast";
+
+    case OPTICAL_LASER_PROFILE_STABLE:
+      return "stable";
+
+    case OPTICAL_LASER_PROFILE_DEFAULT:
+    default:
+      return "default";
+  }
+}
+
+void OpticalSensors_ResetDiagnostics(void)
+{
+  runtime_diag.bridge_recovery_count = 0U;
+  runtime_diag.bh1750_stale_count = 0U;
+  runtime_diag.vl53_stale_count = 0U;
+  runtime_diag.wondercam_stale_count = 0U;
+  runtime_diag.wondercam_online_count = 0U;
+  runtime_diag.health_event_count = 0U;
+  runtime_diag.fault_event_count = 0U;
+  runtime_diag.last_health_ms = 0U;
+  runtime_diag.last_fault_ms = 0U;
+  runtime_diag.wondercam_conf_x10000 = 0U;
+  runtime_diag.last_health_code = (uint8_t)OPTICAL_EVENT_DIAGNOSTICS_RESET;
+  runtime_diag.last_fault_code = (uint8_t)OPTICAL_EVENT_NONE;
+  runtime_diag.wondercam_raw_class_id = 0U;
+  runtime_diag.wondercam_filtered_class_id = 0U;
+  runtime_diag.wondercam_candidate_streak = 0U;
 }

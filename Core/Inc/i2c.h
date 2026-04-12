@@ -29,6 +29,7 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
+#include "optical_slice_types.h"
 
 /* USER CODE END Includes */
 
@@ -41,6 +42,10 @@ extern I2C_HandleTypeDef hi2c1;
 void MX_I2C1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+HAL_StatusTypeDef OpticalMasterLink_Init(void);
+void OpticalMasterLink_UpdateFrame(const optical_slice_frame_t *frame);
+uint8_t OpticalMasterLink_IsHealthy(void);
+uint8_t OpticalMasterLink_HasRecentActivity(void);
 
 /* USER CODE END Prototypes */
 

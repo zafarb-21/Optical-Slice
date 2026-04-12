@@ -37,5 +37,14 @@ enum
 HAL_StatusTypeDef OpticalSensors_Init(void);
 HAL_StatusTypeDef OpticalSensors_Poll(optical_slice_frame_t *frame, uint32_t *update_flags);
 const optical_sensor_status_t *OpticalSensors_GetTable(uint8_t *count);
+void OpticalSensors_GetRuntimeConfig(optical_runtime_config_t *config);
+void OpticalSensors_GetDiagnostics(optical_runtime_diag_t *diag);
+uint8_t OpticalSensors_HasSnowBaseline(void);
+uint16_t OpticalSensors_GetSnowBaselineMm(void);
+HAL_StatusTypeDef OpticalSensors_CaptureSnowBaseline(void);
+void OpticalSensors_ClearSnowBaseline(void);
+HAL_StatusTypeDef OpticalSensors_SetLaserProfile(optical_laser_profile_t profile);
+const char *OpticalSensors_GetLaserProfileName(uint8_t profile);
+void OpticalSensors_ResetDiagnostics(void);
 
 #endif /* OPTICAL_SLICE_SENSORS_H */
