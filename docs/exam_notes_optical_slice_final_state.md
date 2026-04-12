@@ -1,284 +1,328 @@
-# Optical Slice Exam Notes: Final Finished System
+# Optical Slice Exam Notes: Current Finished System
 
-This note is the clean "finished project" version of the optical slice that we can use for exam prep.
+This note is the exam-prep version of our optical slice based on what the firmware actually does now.
 
 Important clarification:
 
-- this document describes the intended final architecture of the optical slice
-- the hardware direction is confirmed by the repo
-- some implementation details below, especially the exact upstream packet layout, are an engineering inference based on the current frame structure and bus design because that final protocol is not fully implemented in code yet
-
-If we have to explain the optical slice in an exam as if the system is fully complete, this is the version to use.
+- this document is written as the clean "finished system" explanation we would give in an exam
+- the architecture and packet behavior below now match the current repo much more closely than the earlier draft
+- the remaining uncertainty is mostly physical validation, especially final `WonderCam` behavior and threshold confirmation on installed hardware, not missing core firmware architecture
 
 ## 1. One-Paragraph Exam Answer
 
-The optical slice is an STM32-based sensing node built on an `STM32F303K8T6` that collects ambient light, time-of-flight distance, laser beam state, and camera-based classification data. The STM32 communicates with the local optical sensors through an `SC18IS604` SPI-to-I2C bridge, while the laser transmitter and receiver are connected directly to STM32 GPIO. The optical slice fuses all sensor readings into a single application frame, converts raw distance into snow-height information, classifies precipitation and package presence, and then sends a finalized status packet to the master board over the STM32's native `I2C1` interface. Interrupts are used for timing, bridge event notification, and master-board communication, while the main loop performs sensor fusion and packet preparation.
+Our optical slice is an `STM32F303K8T6` sensing node that measures ambient light, time-of-flight distance, laser beam state, and camera-based classification. The STM32 talks to local optical sensors through an `SC18IS604` SPI-to-I2C bridge, while the laser transmitter and receiver are handled directly through GPIO. The firmware fuses all sensor readings into one application frame, interprets ToF distance as clear, snow, or obstruction, derives snow height, detects presence and motion from the laser path, classifies precipitation and package state with `WonderCam`, and exposes the resulting data to the master board over the STM32 native `I2C1` interface. `SysTick` provides timing, `SC18_INT` provides bridge event notification, and the `I2C1` interrupt path handles the upstream slave protocol.
 
-## 2. Final Hardware Layout
+## 2. Hardware Layout
 
 ### Controller
 
 - MCU: `STM32F303K8T6`
-- board platform: `NUCLEO-F303K8`
+- board: `NUCLEO-F303K8`
 
 ### Bus partition
 
-The finished system has three communication layers:
+The optical slice is split into three layers:
 
-1. local STM32 control layer
-   The MCU controls reset lines, chip select, interrupt input, laser TX, laser RX, and debug UART.
-2. sensor access layer
-   The MCU uses `SPI1` to communicate with the `SC18IS604`.
+1. local MCU control layer
+   The STM32 controls reset, chip select, interrupt input, laser TX, laser RX, and debug UART.
+2. bridge transport layer
+   The STM32 uses `SPI1` to communicate with the `SC18IS604`.
 3. downstream sensor layer
-   The `SC18IS604` drives the local sensor-side I2C bus for optical sensors.
+   The `SC18IS604` drives the sensor-side I2C bus for local optical sensors.
 
-### Final signal ownership
+### Signal ownership
 
-- `SPI1` is used only for `SC18IS604` communication
-- downstream sensor-side I2C is used by:
+- `SPI1` is used for `SC18IS604`
+- downstream bridge-backed I2C is used for:
   - `BH1750`
   - `VL53L1X`
   - `WonderCam`
-- direct GPIO is used by:
+- direct GPIO is used for:
   - laser transmitter on `PB0`
   - laser receiver on `PA12`
-- upstream `I2C1` is reserved for the master board link on:
+- upstream `I2C1` is used for the master board on:
   - `PB6` = `I2C1_SCL`
   - `PB7` = `I2C1_SDA`
-- `USART2` is used for debug / bench visibility, not as the main production interface
+- `USART2` is used for debugging and bench visibility
 
-### Final sensor addresses
+### Sensor addresses
 
 - `BH1750` = `0x23`
 - `BH1750` alternate = `0x5C`
 - `VL53L1X` = `0x29`
 - `WonderCam` = `0x32`
+- optical slice upstream `I2C1` slave address = `0x42`
 
-## 3. Libraries Used In The Finished System
+## 3. Libraries And Firmware Modules
 
 ### Platform libraries
 
-- `STM32CubeIDE` generated project structure
+- `STM32CubeIDE` generated project
 - `STM32F3xx HAL`
 - `CMSIS`
 
-These are used for:
+These provide:
 
-- GPIO control
-- SPI transactions
+- GPIO
+- SPI
 - I2C peripheral control
-- UART debug output
+- UART
 - EXTI dispatch
-- SysTick-based timing
+- SysTick timing
 
-### Sensor libraries
+### Sensor library
 
 - ST `VL53L1X` ULD package from `STSW-IMG009`
 
-This library is used to:
+It is used to:
 
-- boot-check the `VL53L1X`
-- initialize the sensor
-- configure the ranging mode
-- poll for new data
+- identify the `VL53L1X`
+- initialize it
+- configure and start ranging
+- poll for ready data
 - read distance and range status
-- clear sensor interrupts after each measurement
+- clear interrupts after each reading
 
-### Project firmware modules
+### Project modules
 
 - `optical_slice_app`
 - `optical_slice_sensors`
 - `sc18is604`
 - `vl53l1x_bridge`
 - `optical_slice_validation`
+- `i2c`
 
-In the final system:
+In the current finished explanation:
 
-- `optical_slice_sensors` owns raw sensor acquisition
-- `optical_slice_app` owns fusion, state decisions, and packet publication
+- `optical_slice_sensors` owns acquisition, freshness checks, derived sensor state, and runtime tuning data
+- `optical_slice_app` owns reporting and app-level state publication
 - `sc18is604` owns bridge communication
-- `vl53l1x_bridge` owns ToF bridge-safe access
-- `optical_slice_validation` is used for bench verification and maintenance checks
+- `vl53l1x_bridge` owns safe `VL53L1X` access through the bridge
+- `optical_slice_validation` owns bench snapshot formatting
+- `i2c` owns the upstream `I2C1` slave packet interface
 
 ## 4. Final Functional Behavior
 
-In the finished optical slice, every input path is fully active.
-
 ### BH1750 role
 
-`BH1750` measures ambient light level.
+`BH1750` measures ambient light.
 
-Final purpose:
+Purpose:
 
-- determine environmental brightness
-- support a `dark_detected` flag
-- provide context for optical conditions
+- provide `ambient_lux_x10`
+- determine whether the scene is dark
+- support context for optical conditions
 
 ### VL53L1X role
 
 `VL53L1X` measures object distance in millimeters.
 
-Final purpose:
+Purpose:
 
-- measure the distance from the sensor to the snow surface or target object
 - provide the raw distance field
-- support derived snow-height calculation
+- support snow-state interpretation
+- support snow-height output
+- detect possible near obstruction conditions
 
-Final snow-height formula:
+### Final ToF interpretation rule
 
-`snow_height_mm = calibrated_baseline_mm - object_distance_mm`
+This is the exact rule we should say in the exam because it matches the current firmware logic:
 
-Where:
+- `>= 1500 mm` means zero snow / clear
+- `1000 mm` to `1499 mm` means snow is present
+- `< 1000 mm` means obstruction
 
-- `calibrated_baseline_mm` is the known distance from the installed optical slice to the ground or zero-snow reference plane
-- `object_distance_mm` is the live `VL53L1X` measurement
+### Final snow-height rule
 
-This means:
+The firmware uses `1500 mm` as the current zero-snow reference.
 
-- larger snow accumulation -> smaller measured object distance
-- smaller snow accumulation -> larger measured object distance
+So:
+
+`snow_height_mm = 1500 mm - object_distance_mm`
+
+but only when the distance is in the snow zone and not in the obstruction zone.
+
+That means:
+
+- if distance is `1500 mm` or greater, snow height is effectively `0 mm`
+- if distance drops below `1500 mm` but stays at or above `1000 mm`, snow height increases
+- if distance goes below `1000 mm`, the firmware treats it as obstruction, not valid snow accumulation
 
 ### Laser path role
 
-The laser subsystem is used as a binary beam-interruption path.
+The laser subsystem is a beam-interruption path.
 
-Final purpose:
+Purpose:
 
-- detect presence through beam break / beam restore logic
-- support fast presence events
-- support motion logic through assertion / release timing windows
+- detect beam state
+- derive `presence_detected`
+- derive `motion_detected`
+- support fast digital event detection independently of the camera path
 
-Final meaning:
+Meaning:
 
 - `laser_signal_detected = 1` means the receiver sees the expected beam state
-- `presence_detected = 1` means the monitored path is occupied or interrupted according to the chosen beam logic
-- `motion_detected = 1` means recent beam transitions indicate movement through the slice
+- `presence_detected = 1` means the beam logic indicates occupancy/interruption
+- `motion_detected = 1` means recent beam transitions indicate motion
+
+The firmware also supports runtime laser timing profiles:
+
+- `default`
+- `fast`
+- `stable`
 
 ### WonderCam role
 
 `WonderCam` is the classification sensor.
 
-Final purpose:
+Purpose:
 
-- detect precipitation category
-- detect package / foreign object category
+- classify precipitation state
+- classify package / foreign-object state
 - provide confidence-filtered scene interpretation
 
-Final classification mapping:
+Current class mapping:
 
 - class `1` -> none
 - class `5` -> ice
 - class `10` -> package
 - class `12` -> snow
 
-Final filtering behavior:
+Filtering behavior:
 
-- a classification is only accepted above the confidence threshold
-- the same result must remain stable across multiple frames
-- the accepted class is then fused into the optical slice state packet
+- low-confidence classifications are rejected
+- the same class must remain stable across multiple frames
+- the accepted class is fused into the optical slice frame
 
-## 5. Final Connection Path
+## 5. Connection Path
 
 ### Local sensor path
 
-The final local data path is:
-
 `STM32 -> SPI1 -> SC18IS604 -> downstream I2C -> BH1750 / VL53L1X / WonderCam`
 
-This path is used because:
+Why this matters:
 
-- the local sensors share a common sensor-side I2C network
-- the STM32 native `I2C1` is preserved for the master board
-- the bridge makes the optical slice modular and electrically separated from the upstream control bus
+- local sensors share the downstream sensor bus
+- the STM32 native `I2C1` stays reserved for the upstream host/master board
+- the bridge isolates local sensing traffic from the upstream control bus
 
 ### Laser path
 
-The laser path is separate from the bridge:
-
 `STM32 GPIO -> laser transmitter / laser receiver`
 
-This is intentionally direct because the laser path is a fast binary digital signal and does not need I2C abstraction.
+Why direct GPIO is correct:
+
+- the signal is binary and timing-sensitive
+- it does not need I2C abstraction
+- it is simpler and faster to evaluate directly in the MCU
 
 ### Upstream system path
 
-The final system output path is:
+`Optical slice fused state -> packet formatter -> I2C1 slave interface -> master board`
 
-`Optical slice fused state -> STM32 packet formatter -> I2C1 -> master board`
+In the current system:
 
-In the finished system:
+- the STM32 acts as the optical slice endpoint on the upstream bus
+- the master board can read status, configuration, and diagnostics packets
+- `USART2` remains a secondary debug interface
 
-- the STM32 acts as the optical slice endpoint on the master board bus
-- the master board reads a structured optical slice status packet
-- UART remains available only for debugging and lab bring-up
+## 6. Upstream Packet Structure
 
-## 6. Final Packet Structure
+The clean exam answer is no longer hypothetical. The firmware now uses packetized upstream output on `I2C1`.
 
-The repo already defines the optical slice software frame in `optical_slice_frame_t`. In a finished system, the cleanest exact upstream design is to export that frame to the master board in a compact packet with header and integrity checking.
+### Common packet header
 
-Because the repo does not yet contain a finalized byte-level master-board spec, the packet below is the final-state format we should describe in the exam. It is directly aligned with the current frame fields.
+Each packet starts with:
 
-### Proposed final upstream packet
+1. start byte `0xA5`
+2. start byte `0x5A`
+3. protocol version
+4. packet type
+5. payload length
+6. sequence number
 
-1. `start_byte`
-   Value: `0xAA`
-   Purpose: frame start marker
-2. `node_id`
-   Value: optical slice node ID
-   Purpose: identify this sensor node on the system bus
-3. `packet_type`
-   Value: optical slice status packet
-   Purpose: distinguish status from diagnostics or commands
-4. `payload_length`
-   Purpose: payload size in bytes
-5. `sequence_counter`
-   Purpose: incrementing packet counter
-6. `timestamp_ms`
-   Purpose: age / timing of the frame
-7. `status_flags`
-   Purpose: packed health and detection flags
-8. `ambient_lux_x10`
-   Purpose: ambient light in tenths of lux
-9. `object_distance_mm`
-   Purpose: raw `VL53L1X` distance
-10. `snow_height_mm`
-    Purpose: derived snow-height output
-11. `precipitation_level_x10`
-    Purpose: precipitation confidence or score in tenths
-12. `precipitation_type`
-    Purpose: none / snow / ice / unknown
-13. `motion_detected`
-    Purpose: motion state
-14. `package_detected`
-    Purpose: package detection state
-15. `presence_detected`
-    Purpose: occupancy / beam-break state
-16. `dark_detected`
-    Purpose: low-light state
-17. `camera_online`
-    Purpose: WonderCam health state
-18. `laser_online`
-    Purpose: laser subsystem health state
-19. `laser_signal_detected`
-    Purpose: raw beam state
-20. `tof_range_status`
-    Purpose: raw range-quality code from `VL53L1X`
-21. `crc16`
-    Purpose: packet integrity check
+Each packet ends with:
 
-### Why this packet is the right final answer
+- `crc16`
 
-This is the most defensible exam answer because:
+### Status packet
 
-- it matches the existing firmware frame fields exactly
-- it separates transport metadata from sensor payload
-- it includes integrity protection
-- it is simple enough for an embedded master board to parse reliably
+The status packet exports the fused optical slice frame:
 
-## 7. Final Status Flags
+1. `timestamp_ms`
+2. `status_flags`
+3. `ambient_lux_x10`
+4. `object_distance_mm`
+5. `snow_height_mm`
+6. `precipitation_level_x10`
+7. `precipitation_type`
+8. `motion_detected`
+9. `package_detected`
+10. `presence_detected`
+11. `dark_detected`
+12. `camera_online`
+13. `laser_online`
+14. `laser_signal_detected`
+15. `tof_range_status`
 
-The optical slice uses packed status bits to summarize sensor health and scene state.
+### Configuration packet
 
-Final status flags include:
+The configuration packet exports runtime operating state:
+
+1. `timestamp_ms`
+2. `snow_baseline_mm`
+3. `laser_presence_assert_ms`
+4. `laser_presence_release_ms`
+5. `laser_motion_hold_ms`
+6. `laser_profile`
+7. config flags
+8. sample/report timing
+9. stale timing values
+
+### Diagnostics packet
+
+The diagnostics packet exports maintenance and soak-test visibility:
+
+1. `timestamp_ms`
+2. upstream TX count
+3. upstream RX count
+4. upstream error count
+5. bridge recovery count
+6. `BH1750` stale count
+7. `VL53L1X` stale count
+8. `WonderCam` stale count
+9. `WonderCam` online count
+10. health-event count
+11. fault-event count
+12. last health / fault timestamps
+13. last health / fault codes
+14. raw and filtered `WonderCam` classes
+15. class streak
+16. confidence
+
+### Upstream command model
+
+The current control model is single-byte command based.
+
+Important commands:
+
+- select status packet
+- select configuration packet
+- select diagnostics packet
+- capture baseline
+- clear baseline
+- choose `default` / `fast` / `stable` laser profile
+- reset diagnostics
+
+For exam wording, we can say:
+
+"The STM32 exposes multiple packet views over I2C1 and accepts simple host commands to select packet type, capture calibration state, and change runtime tuning."
+
+## 7. Status Flags
+
+The optical slice uses packed status bits to summarize health and scene state.
+
+Important flags include:
 
 - `BH1750 present`
 - `BH1750 valid`
@@ -292,123 +336,121 @@ Final status flags include:
 - `master link OK`
 - `laser signal detected`
 - `presence detected`
+- `VL53 range valid`
+- `snow height valid`
+- `obstruction detected`
 
-In the final system, these flags are always updated before a new packet is exported to the master board.
+These flags are updated before the status packet is refreshed.
 
-## 8. Final IRQ Utilization
-
-This section is important because it explains how the finished optical slice behaves as a real embedded system instead of just a polling demo.
+## 8. IRQ Utilization
 
 ### SysTick
 
-`SysTick` is the global timing base.
+`SysTick` is the main timing base.
 
-Final use:
+It supports:
 
 - sensor scheduling
 - debounce timing
-- timeout supervision
+- stale-data timeouts
 - motion hold windows
-- packet age stamping
-- periodic housekeeping
+- packet timestamping
+- periodic health reporting
 
 ### EXTI for `SC18_INT`
 
-`SC18_INT` is connected to `PA9` and routed through `EXTI9_5`.
+`SC18_INT` is connected to `PA9` through `EXTI9_5`.
 
-Final use:
+Final role:
 
-- detect when the bridge or bridge-connected device has an event pending
-- wake or notify the main application that a sensor-side service action is needed
-- reduce unnecessary blind polling
+- notify the application that bridge-side activity happened
+- let the main loop react without doing long SPI work inside the ISR
 
-Best-practice ISR behavior:
+Best-practice explanation:
 
-- do not perform long SPI transactions inside the ISR
-- only set a flag
-- let the main loop or scheduler perform the actual bridge service
-
-That means the final role of `SC18_INT` is event notification, not full transaction execution inside interrupt context.
+- the ISR sets a flag
+- the main loop performs the actual bridge service and sensor polling
 
 ### I2C1 event interrupt
 
-The finished system uses `I2C1_EV_IRQHandler()` for the master board interface.
+`I2C1_EV_IRQHandler()` is part of the real upstream interface.
 
-Final use:
+Final role:
 
-- respond when the master board addresses the optical slice
-- transmit the latest fused optical packet
-- receive commands such as status request, reset request, or calibration request
-
-In the finished design, this interrupt is important because the optical slice is no longer just logging over UART. It becomes a real bus participant in the larger system.
+- detect that the master board addressed the optical slice
+- transmit the selected packet
+- receive single-byte host commands
 
 ### I2C1 error interrupt
 
-In a polished final system, the `I2C1` slave interface should also use an error-handling interrupt path.
+`I2C1_ER_IRQHandler()` is also used.
 
-Final use:
+Final role:
 
-- detect bus errors
-- detect arbitration or framing issues as applicable
-- recover the interface cleanly
-- preserve link reliability to the master board
+- detect bus faults
+- recover the listen state
+- keep the upstream slave interface healthy
 
-This is not central in the current repo, but it is the correct final-system explanation for exam purposes.
+### UART role
 
-### UART interrupt role
+`USART2` is secondary.
 
-In the final system, UART is secondary.
+It is used for:
 
-Final use:
+- boot diagnostics
+- health reporting
+- live state visibility
+- fault reporting during bench work
 
-- debug logging
-- field diagnostics
-- service / maintenance output
-
-UART is not the main exported data path in the final design.
+It is not the primary production data export path.
 
 ## 9. Final Software Flow
 
-The finished optical slice follows this cycle:
+The system follows this cycle:
 
-1. initialize GPIO, SPI, I2C1, UART, and the bridge
+1. initialize GPIO, SPI, `I2C1`, `USART2`, and the bridge
 2. verify the bridge is reachable
 3. initialize `BH1750`, `VL53L1X`, and `WonderCam`
-4. enable the laser transmitter and confirm laser receiver behavior
-5. start periodic sensing
-6. read ambient light from `BH1750`
-7. read distance from `VL53L1X`
-8. read classification from `WonderCam`
-9. read laser beam state from GPIO
-10. derive:
-    - dark state
-    - presence state
-    - motion state
-    - precipitation type
-    - package state
-    - snow height
-11. update status flags
-12. pack the finalized optical slice frame
-13. expose the latest packet to the master board through `I2C1`
-14. optionally publish debug text on `USART2`
+4. enable the laser transmitter and read the receiver state
+5. poll ambient light from `BH1750`
+6. poll ToF distance from `VL53L1X`
+7. poll classification data from `WonderCam`
+8. sample the laser beam state
+9. derive:
+   - dark state
+   - presence state
+   - motion state
+   - precipitation type
+   - package state
+   - snow height
+   - obstruction state
+10. update status flags
+11. refresh status, config, and diagnostics packets
+12. expose the latest selected packet on upstream `I2C1`
+13. optionally print debug text on `USART2`
 
-## 10. Best Exam Wording For "How Everything Works"
+## 10. Best Exam Wording
 
-If asked to explain the project portion clearly, this is the strongest short answer:
+If we need one strong short answer, this is the version to memorize:
 
-"Our optical slice is an STM32F303-based sensing node. The STM32 talks to local optical sensors through an SC18IS604 SPI-to-I2C bridge, while the laser transmitter and receiver are handled directly through GPIO. The BH1750 provides ambient light, the VL53L1X provides distance for snow-height calculation, and the WonderCam provides classification such as snow, ice, or package detection. The MCU fuses all of these signals into one structured optical slice status packet and sends that packet to the master board over I2C1. SysTick provides timing, SC18_INT provides bridge event notification, and the I2C interrupt path handles communication with the master board."
+"Our optical slice is an STM32F303-based sensing node. The STM32 communicates with local sensors through an SC18IS604 SPI-to-I2C bridge and handles the laser path directly through GPIO. The BH1750 measures ambient light, the VL53L1X measures distance, and the WonderCam provides classification such as snow, ice, or package detection. The firmware fuses those inputs into one optical slice state, interprets distance as clear, snow, or obstruction using defined thresholds, derives snow height, and sends structured status data to the master board through I2C1. SysTick provides timing, SC18_INT provides bridge event notification, and the I2C interrupt path handles the upstream slave protocol."
 
 ## 11. What To Remember For The Exam
 
-- local sensors are not on the STM32 native `I2C1`; they are behind the `SC18IS604`
+- local sensors are not on STM32 native `I2C1`; they are behind the `SC18IS604`
 - `I2C1` is the upstream master-board interface
 - the laser path is direct GPIO, not I2C
 - `BH1750` gives ambient light
 - `VL53L1X` gives raw distance
-- snow height is derived from calibrated baseline minus measured distance
 - `WonderCam` provides scene classification
-- the STM32 fuses all sensor outputs into one optical slice packet
+- `>= 1500 mm` means clear / zero snow
+- `1000..1499 mm` means snow
+- `< 1000 mm` means obstruction
+- snow height is derived relative to the `1500 mm` reference
+- `presence_detected` and `motion_detected` come from the laser beam logic
+- the STM32 exports packetized data over `I2C1`
+- the upstream link supports status, configuration, and diagnostics views
 - `SysTick` handles timing
-- `EXTI` on `SC18_INT` handles bridge event notification
-- `I2C1` interrupts handle master-board communication
-- UART is for debug, not the final production data interface
+- `SC18_INT` gives bridge event notification
+- `I2C1` event and error interrupts handle upstream communication
+- `USART2` is for debugging, not the main production interface
