@@ -1,72 +1,30 @@
 # Optical Slice Firmware
 
-Current firmware status for the STM32-based optical slice node.
+This repo is the STM32 firmware we are using for our optical slice node. The target is a `NUCLEO-F303K8` / `STM32F303K8T6`, and the firmware is built around the final sensor topology we want on the board:
 
-## Architecture
+- `STM32F303 <-> SPI1 <-> SC18IS604 <-> downstream sensor I2C bus`
+- `STM32F303 <-> I2C1 <-> upstream master board`
+- `STM32F303 GPIO <-> laser transmitter / laser receiver`
 
-- `STM32F303 <-> SPI1 <-> SC18IS604 <-> downstream I2C sensors`
-- `STM32F303 <-> I2C1 <-> master board`
+The important design choice here is that we are not using the STM32's native `I2C1` for the local optical sensors. `I2C1` is being held for the upstream master-board link. Local sensors are supposed to sit behind the `SC18IS604` SPI-to-I2C bridge, while the laser path is wired straight to STM32 GPIO.
 
-The STM32 does not use its native `I2C1` to talk directly to the optical sensors in the final design. Sensor access goes through `SPI1` to the `SC18IS604` bridge. `I2C1` is kept for the upstream master-board link.
+## Hardware Layout
 
-## Working Now
+### MCU / board
 
-- `SC18IS604` SPI transport and bridge register access
-- downstream bridge-backed I2C transactions
-- `BH1750` ambient light sampling through the bridge
-- `VL53L1X` identification, init, start ranging, data-ready polling, distance read, and interrupt clear through the bridge
-- laser transmitter driven directly from `PB0`
-- laser receiver read directly on `PA12`
-- live debug/status frame over `USART2`
+- `STM32F303K8T6`
+- `NUCLEO-F303K8`
+- generated with `STM32CubeIDE`
+- GNU Tools for STM32 toolchain (`14.3.rel1` in the generated `Debug/makefile`)
 
-## Important VL53L1X Note
-
-The `VL53L1X` now works through the `SC18IS604`, but only when register reads use split transactions:
-
-1. write 16-bit register address
-2. perform a separate read transaction
-
-The `SC18IS604` combined read-after-write command was bench-tested and does not reliably work with the `VL53L1X` path on this hardware. The production platform shim therefore uses discrete write/read transactions for `VL53L1X` register access.
-
-The official ST `VL53L1X` ULD package used by the project is under:
-
-- `STSW-IMG009/STSW-IMG009_v3.5.5`
-
-## Current Sensor State
-
-- `BH1750`: working
-- `VL53L1X`: working
-- laser path: integrated and visible in the debug frame
-- `WonderCam`: not integrated yet
-
-The UART live frame currently reports:
-
-- bridge health
-- ambient light
-- dark/light threshold state
-- raw `VL53L1X` distance and range status
-- laser TX state, raw RX level, and interpreted beam state
-- camera placeholder status
-
-Note: the ambient light value printed in the debug frame is currently `lux_x10`, not plain lux. For example, `39` means `3.9 lux`.
-
-## Known Sensor Addresses
+### Sensor-side addresses
 
 - `BH1750` = `0x23`
 - `BH1750` alternate = `0x5C`
 - `VL53L1X` = `0x29`
 - `WonderCam` = `0x32`
 
-## Laser Path
-
-The laser front end is not on I2C.
-
-- `PB0` drives the transmitter
-- `PA12` reads the receiver
-
-The receiver is handled as a digital GPIO input in firmware and is included in the live status frame.
-
-## STM32 Pin Map
+### Pin map
 
 - `PB3` = `SPI1_SCK`
 - `PB4` = `SPI1_MISO`
@@ -76,17 +34,159 @@ The receiver is handled as a digital GPIO input in firmware and is included in t
 - `PA9` = `SC18_INT`
 - `PB0` = `LASER_TX`
 - `PA12` = `LASER_RX`
-- `PB6` = `I2C1_SCL` to master board
-- `PB7` = `I2C1_SDA` to master board
+- `PB6` = `I2C1_SCL` to the master board
+- `PB7` = `I2C1_SDA` to the master board
+- `PA2` = `USART2_TX` (`VCP_TX`)
+- `PA15` = `USART2_RX` (`VCP_RX`)
 
-## What Is Still Pending
+## What The Firmware Does Right Now
 
-1. `WonderCam` command/data integration through the bridge
-2. snow-height conversion from mounted baseline distance
-3. calibration workflow for deployed `VL53L1X` measurements
-4. final master-board `I2C1` protocol and slave address
-5. cleanup or formalization of the temporary `USART2` debug output
+The app entry points are in `Core/Src/optical_slice_app.c`. `main()` just initializes the Cube peripherals and then calls:
 
-## Current Bring-Up Outcome
+- `OpticalSlice_Init()`
+- `OpticalSlice_Run()`
 
-The firmware can now boot, initialize the bridge, read ambient light, read the laser receiver state, initialize the `VL53L1X`, and stream a stable debug frame over UART. The system is now past basic bus bring-up and into application-layer integration work.
+At this point, the firmware can already do the following:
+
+- bring up the `SC18IS604` bridge over `SPI1`
+- print bridge boot diagnostics and version info over `USART2`
+- read `BH1750` ambient light through the bridge
+- mark the scene as dark when ambient light falls below `10.0 lx`
+- initialize the `VL53L1X` through the bridge using the ST ULD driver
+- start `VL53L1X` ranging, poll for data-ready, read distance, and clear interrupts
+- drive the laser transmitter from `PB0`
+- read the laser receiver on `PA12`
+- poll the `WonderCam` over the bridge and decode its classification summary
+- report a combined live status line over UART when important state changes happen
+
+## Current Sensor Status
+
+### Confirmed working path
+
+- `SC18IS604` bridge transport
+- downstream bridge-backed I2C transactions
+- `BH1750` ambient light reads
+- `VL53L1X` ID / init / ranging / distance reads
+- laser TX/RX GPIO path
+- UART debug output
+
+### Partially integrated path
+
+- `WonderCam` startup and polling are implemented in code
+- the firmware reads the camera firmware register, switches to classification mode, enables the LED, and reads the class summary block
+- the current classification mapping is:
+  - class `1` -> none
+  - class `5` -> ice
+  - class `10` -> package
+  - class `12` -> snow
+- camera classifications are only accepted when confidence is at least `0.85` and the same class is stable for `4` frames
+
+We would still treat the `WonderCam` path as integration in progress until it is fully bench-validated on the real hardware.
+
+## UART Output
+
+The debug port is `USART2` at `38400 8N1`.
+
+On boot, we currently print:
+
+- `OPTICAL boot`
+- a one-line boot diagnostic snapshot
+- `SC18IS604` version text if the bridge responds
+- a `VL53PROBE` line that confirms the bridge can reach the `VL53L1X`
+
+During runtime, the app prints a `LIVE` report when state changes matter. The report currently includes:
+
+- ambient light in lux
+- dark / not dark state
+- `VL53L1X` distance and its coarse height bucket
+- laser signal state
+- package detection state
+- precipitation type from `WonderCam`
+- camera online / offline state
+
+Two fields are present in the live frame but are still placeholders right now:
+
+- `presence_detected`
+- `motion_detected`
+
+Those are formatted in the UART report, but the current sensor poll path still leaves them at `0`.
+
+## VL53L1X Bridge Note
+
+The `VL53L1X` bridge path depends on split register transactions.
+
+What works on this hardware is:
+
+1. write the 16-bit register address
+2. perform a separate read transaction
+
+The combined read-after-write style that some devices tolerate is not reliable here through the `SC18IS604`, so the `VL53L1X` access layer uses discrete write/read transactions instead.
+
+The ST ULD package used in this repo is under:
+
+- `STSW-IMG009/STSW-IMG009_v3.5.5`
+
+## Build Notes
+
+We can build this project in either of these ways:
+
+### STM32CubeIDE
+
+Open the project in `STM32CubeIDE` and build the `Debug` configuration.
+
+### Generated makefile
+
+From the repo root:
+
+```bash
+make -C Debug all
+```
+
+The generated artifacts land in `Debug/`, including:
+
+- `Debug/Optical Slice.elf`
+- `Debug/Optical Slice.map`
+- `Debug/Optical Slice.list`
+
+## Validation Helpers
+
+We added a small validation module for bench checks:
+
+- `Core/Inc/optical_slice_validation.h`
+- `Core/Src/optical_slice_validation.c`
+
+The main entry points are:
+
+- `OpticalValidation_RunSnapshot()`
+- `OpticalValidation_FormatReport()`
+
+That code is useful for quick validation of:
+
+- app poll health
+- bridge presence
+- `BH1750` readiness
+- `VL53L1X` presence and valid range data
+- laser GPIO readability
+- laser beam detection
+
+## What Is Still Not Finished
+
+- the upstream master-board `I2C1` protocol is not implemented yet
+- the STM32 is not acting as the final master-board-facing slave yet
+- `snow_height_mm` is still a placeholder and is not derived from a mounted baseline yet
+- `presence_detected` and `motion_detected` still need real logic behind them
+- the `WonderCam` path needs more hardware validation before we would call it done
+- the UART output is still bring-up/debug oriented, not a finalized external interface
+
+## Repo Layout
+
+- `Core/Src/optical_slice_app.c`: top-level app logic and UART reporting
+- `Core/Src/optical_slice_sensors.c`: sensor bring-up and polling
+- `Core/Src/vl53l1x_bridge.c`: `VL53L1X` bridge-backed ranging layer
+- `Core/Src/sc18is604.c`: SPI-to-I2C bridge driver
+- `Core/Src/optical_slice_validation.c`: bench validation helpers
+- `docs/`: bench notes, weekly deliverables, and capture scripts
+
+## Current Bottom Line
+
+The project is past basic bring-up. The bridge path is up, ambient light and ToF ranging are working, the laser front end is integrated, and the firmware is already producing a combined live status report. The next real work is finishing the upstream interface, turning raw distance into snow-height data, and finishing / validating the `WonderCam` path.
