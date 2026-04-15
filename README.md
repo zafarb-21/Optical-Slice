@@ -206,22 +206,6 @@ We can build the project in either of these ways:
 
 Open the project in `STM32CubeIDE` and build the `Debug` configuration.
 
-### Generated makefile
-
-From the repo root:
-
-```bash
-make -C Debug all
-```
-
-The generated artifacts land in `Debug/`, including:
-
-- `Debug/Optical Slice.elf`
-- `Debug/Optical Slice.map`
-- `Debug/Optical Slice.list`
-
-If the standalone toolchain rejects `-fcyclomatic-complexity`, use CubeIDE's managed build or remove that generated flag for local CLI builds.
-
 ## What Is Still Left To Make This Better
 
 The project is well past basic bring-up, but a few areas still matter if we want the node to behave like a polished final system:
