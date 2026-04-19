@@ -99,7 +99,7 @@ In the current finished explanation:
 - `sc18is604` owns bridge communication
 - `vl53l1x_bridge` owns safe `VL53L1X` access through the bridge
 - `optical_slice_validation` owns bench snapshot formatting
-- `i2c` owns the upstream `I2C1` slave packet interface
+- `i2c` owns the upstream `I2C1` slave response interface
 
 ## 4. Final Functional Behavior
 
@@ -223,31 +223,31 @@ Why direct GPIO is correct:
 In the current system:
 
 - the STM32 acts as the optical slice endpoint on the upstream bus
-- the master board can read status, configuration, and diagnostics packets
+- the master board can read status, configuration, and diagnostics responses
 - `USART2` remains a secondary debug interface
 
-## 6. Upstream Packet Structure
+## 6. Upstream Response Structure
 
-The clean exam answer is no longer hypothetical. The firmware now uses packetized upstream output on `I2C1`.
+The clean exam answer is no longer hypothetical. The firmware now uses structured upstream output on `I2C1`.
 
-### Common packet header
+### Common response format
 
-Each packet starts with:
+Each response is ASCII and follows the loaf-requested assignment style:
 
-1. start byte `0xA5`
-2. start byte `0x5A`
-3. protocol version
-4. packet type
-5. payload length
-6. sequence number
+```text
+>VARNAME:VALUE>VARNAME2:VALUE...\n
+```
 
-Each packet ends with:
+Formatting rules:
 
-- `crc16`
+- each field starts with `>`
+- numeric values are unquoted
+- string values are double-quoted
+- unavailable numeric readings can be emitted as `"unavailable"`
 
 ### Status packet
 
-The status packet exports the fused optical slice frame:
+The status response exports the fused optical slice frame:
 
 1. `timestamp_ms`
 2. `status_flags`
@@ -267,7 +267,7 @@ The status packet exports the fused optical slice frame:
 
 ### Configuration packet
 
-The configuration packet exports runtime operating state:
+The configuration response exports runtime operating state:
 
 1. `timestamp_ms`
 2. `snow_baseline_mm`
@@ -275,13 +275,12 @@ The configuration packet exports runtime operating state:
 4. `laser_presence_release_ms`
 5. `laser_motion_hold_ms`
 6. `laser_profile`
-7. config flags
-8. sample/report timing
-9. stale timing values
+7. sample/report timing
+8. master-link health/activity flags
 
 ### Diagnostics packet
 
-The diagnostics packet exports maintenance and soak-test visibility:
+The diagnostics response exports maintenance and soak-test visibility:
 
 1. `timestamp_ms`
 2. upstream TX count
@@ -306,9 +305,9 @@ The current control model is single-byte command based.
 
 Important commands:
 
-- select status packet
-- select configuration packet
-- select diagnostics packet
+- select status response
+- select configuration response
+- select diagnostics response
 - capture baseline
 - clear baseline
 - choose `default` / `fast` / `stable` laser profile
@@ -316,7 +315,7 @@ Important commands:
 
 For exam wording, we can say:
 
-"The STM32 exposes multiple packet views over I2C1 and accepts simple host commands to select packet type, capture calibration state, and change runtime tuning."
+"The STM32 exposes multiple ASCII response views over I2C1 and accepts simple host commands to select the response, capture calibration state, and change runtime tuning."
 
 ## 7. Status Flags
 
@@ -340,7 +339,7 @@ Important flags include:
 - `snow height valid`
 - `obstruction detected`
 
-These flags are updated before the status packet is refreshed.
+These flags are updated before the status response is refreshed.
 
 ## 8. IRQ Utilization
 
@@ -354,7 +353,7 @@ It supports:
 - debounce timing
 - stale-data timeouts
 - motion hold windows
-- packet timestamping
+- response timestamping
 - periodic health reporting
 
 ### EXTI for `SC18_INT`
@@ -378,7 +377,7 @@ Best-practice explanation:
 Final role:
 
 - detect that the master board addressed the optical slice
-- transmit the selected packet
+- transmit the selected response
 - receive single-byte host commands
 
 ### I2C1 error interrupt
@@ -425,8 +424,8 @@ The system follows this cycle:
    - snow height
    - obstruction state
 10. update status flags
-11. refresh status, config, and diagnostics packets
-12. expose the latest selected packet on upstream `I2C1`
+11. refresh status, config, and diagnostics responses
+12. expose the latest selected response on upstream `I2C1`
 13. optionally print debug text on `USART2`
 
 ## 10. Best Exam Wording
@@ -448,7 +447,7 @@ If we need one strong short answer, this is the version to memorize:
 - `< 1000 mm` means obstruction
 - snow height is derived relative to the `1500 mm` reference
 - `presence_detected` and `motion_detected` come from the laser beam logic
-- the STM32 exports packetized data over `I2C1`
+- the STM32 exports structured ASCII data over `I2C1`
 - the upstream link supports status, configuration, and diagnostics views
 - `SysTick` handles timing
 - `SC18_INT` gives bridge event notification

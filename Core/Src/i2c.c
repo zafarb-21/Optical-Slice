@@ -21,16 +21,13 @@
 #include "i2c.h"
 
 /* USER CODE BEGIN 0 */
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "optical_slice_config.h"
 #include "optical_slice_sensors.h"
 
-#define OPTICAL_MASTER_LINK_START0              0xA5U
-#define OPTICAL_MASTER_LINK_START1              0x5AU
-#define OPTICAL_MASTER_LINK_PKT_STATUS          0x01U
-#define OPTICAL_MASTER_LINK_PKT_CONFIG          0x02U
-#define OPTICAL_MASTER_LINK_PKT_DIAGNOSTICS     0x03U
 #define OPTICAL_MASTER_LINK_CMD_STATUS          0x00U
 #define OPTICAL_MASTER_LINK_CMD_CONFIG          0x01U
 #define OPTICAL_MASTER_LINK_CMD_DIAGNOSTICS     0x02U
@@ -40,17 +37,19 @@
 #define OPTICAL_MASTER_LINK_CMD_PROFILE_FAST    0x21U
 #define OPTICAL_MASTER_LINK_CMD_PROFILE_STABLE  0x22U
 #define OPTICAL_MASTER_LINK_CMD_RESET_DIAGNOSTICS 0x30U
-#define OPTICAL_MASTER_LINK_STATUS_PACKET_LEN   33U
-#define OPTICAL_MASTER_LINK_CONFIG_PACKET_LEN   34U
-#define OPTICAL_MASTER_LINK_DIAG_PACKET_LEN     68U
+#define OPTICAL_MASTER_LINK_STATUS_PACKET_LEN   384U
+#define OPTICAL_MASTER_LINK_CONFIG_PACKET_LEN   320U
+#define OPTICAL_MASTER_LINK_DIAG_PACKET_LEN     640U
 
 static optical_slice_frame_t master_link_latest_frame;
-static uint8_t master_link_status_packet[OPTICAL_MASTER_LINK_STATUS_PACKET_LEN];
-static uint8_t master_link_config_packet[OPTICAL_MASTER_LINK_CONFIG_PACKET_LEN];
-static uint8_t master_link_diag_packet[OPTICAL_MASTER_LINK_DIAG_PACKET_LEN];
+static char master_link_status_packet[OPTICAL_MASTER_LINK_STATUS_PACKET_LEN];
+static char master_link_config_packet[OPTICAL_MASTER_LINK_CONFIG_PACKET_LEN];
+static char master_link_diag_packet[OPTICAL_MASTER_LINK_DIAG_PACKET_LEN];
+static uint16_t master_link_status_length;
+static uint16_t master_link_config_length;
+static uint16_t master_link_diag_length;
 static uint8_t master_link_rx_command;
 static uint8_t master_link_selected_command = OPTICAL_MASTER_LINK_CMD_STATUS;
-static uint8_t master_link_sequence;
 static uint8_t master_link_initialized;
 static uint8_t master_link_listen_enabled;
 static uint32_t master_link_last_activity_ms;
@@ -60,81 +59,80 @@ static uint32_t master_link_error_count;
 
 uint8_t OpticalMasterLink_IsHealthy(void);
 uint8_t OpticalMasterLink_HasRecentActivity(void);
+void respondToLoaf(void);
 
-static void OpticalMasterLink_WriteU16(uint8_t *buffer, uint16_t value)
+static const char *OpticalMasterLink_PrecipTypeText(uint8_t precip_type)
 {
-  buffer[0] = (uint8_t)(value & 0xFFU);
-  buffer[1] = (uint8_t)(value >> 8);
+  switch (precip_type)
+  {
+    case OPTICAL_PRECIP_NONE:
+      return "none";
+
+    case OPTICAL_PRECIP_SNOW:
+      return "snow";
+
+    case OPTICAL_PRECIP_ICE:
+      return "ice";
+
+    default:
+      return "unknown";
+  }
 }
 
-static void OpticalMasterLink_WriteU32(uint8_t *buffer, uint32_t value)
+static const char *OpticalMasterLink_LaserProfileText(uint8_t profile)
 {
-  buffer[0] = (uint8_t)(value & 0xFFU);
-  buffer[1] = (uint8_t)((value >> 8) & 0xFFU);
-  buffer[2] = (uint8_t)((value >> 16) & 0xFFU);
-  buffer[3] = (uint8_t)((value >> 24) & 0xFFU);
+  return OpticalSensors_GetLaserProfileName(profile);
 }
 
-static uint16_t OpticalMasterLink_Crc16(const uint8_t *data, uint16_t length)
+static const char *OpticalMasterLink_FormatOptionalU16(char *buffer, size_t length, uint16_t value)
 {
-  uint16_t crc = 0xFFFFU;
-  uint16_t index;
-  uint8_t bit;
+  if ((buffer == NULL) || (length == 0U))
+  {
+    return "";
+  }
 
-  if (data == NULL)
+  if (value == OPTICAL_READING_INVALID_U16)
+  {
+    (void)snprintf(buffer, length, "\"unavailable\"");
+    return buffer;
+  }
+
+  (void)snprintf(buffer, length, "%u", value);
+  return buffer;
+}
+
+static uint16_t OpticalMasterLink_StoreAsciiPacket(char *packet,
+                                                   size_t packet_len,
+                                                   const char *format,
+                                                   ...)
+{
+  va_list args;
+  int written;
+
+  if ((packet == NULL) || (packet_len < 2U) || (format == NULL))
   {
     return 0U;
   }
 
-  for (index = 0U; index < length; ++index)
+  va_start(args, format);
+  written = vsnprintf(packet, packet_len, format, args);
+  va_end(args);
+
+  if (written < 0)
   {
-    crc ^= (uint16_t)data[index] << 8;
-    for (bit = 0U; bit < 8U; ++bit)
-    {
-      if ((crc & 0x8000U) != 0U)
-      {
-        crc = (uint16_t)((crc << 1) ^ 0x1021U);
-      }
-      else
-      {
-        crc <<= 1;
-      }
-    }
+    packet[0] = '\n';
+    packet[1] = '\0';
+    return 1U;
   }
 
-  return crc;
-}
-
-static void OpticalMasterLink_InitPacket(uint8_t *packet,
-                                         uint16_t packet_len,
-                                         uint8_t packet_type,
-                                         uint8_t sequence)
-{
-  if ((packet == NULL) || (packet_len < 7U))
+  if ((size_t)written >= packet_len)
   {
-    return;
+    packet[packet_len - 2U] = '\n';
+    packet[packet_len - 1U] = '\0';
+    return (uint16_t)(packet_len - 1U);
   }
 
-  memset(packet, 0, packet_len);
-  packet[0] = OPTICAL_MASTER_LINK_START0;
-  packet[1] = OPTICAL_MASTER_LINK_START1;
-  packet[2] = OPTICAL_MASTER_LINK_PROTOCOL_VER;
-  packet[3] = packet_type;
-  packet[4] = (uint8_t)(packet_len - 7U);
-  packet[5] = sequence;
-}
-
-static void OpticalMasterLink_FinalizePacket(uint8_t *packet, uint16_t packet_len)
-{
-  uint16_t crc;
-
-  if ((packet == NULL) || (packet_len < 7U))
-  {
-    return;
-  }
-
-  crc = OpticalMasterLink_Crc16(packet, (uint16_t)(packet_len - 2U));
-  OpticalMasterLink_WriteU16(&packet[packet_len - 2U], crc);
+  return (uint16_t)written;
 }
 
 static HAL_StatusTypeDef OpticalMasterLink_EnableListen(void)
@@ -150,89 +148,82 @@ static void OpticalMasterLink_RebuildPackets(void)
 {
   optical_runtime_config_t runtime_config;
   optical_runtime_diag_t runtime_diag;
-  uint8_t config_flags = 0U;
+  char snow_baseline[20];
 
   OpticalSensors_GetRuntimeConfig(&runtime_config);
   OpticalSensors_GetDiagnostics(&runtime_diag);
 
-  OpticalMasterLink_InitPacket(master_link_status_packet,
-                               (uint16_t)sizeof(master_link_status_packet),
-                               OPTICAL_MASTER_LINK_PKT_STATUS,
-                               master_link_sequence);
-  OpticalMasterLink_WriteU32(&master_link_status_packet[6], master_link_latest_frame.timestamp_ms);
-  OpticalMasterLink_WriteU32(&master_link_status_packet[10], master_link_latest_frame.status_flags);
-  OpticalMasterLink_WriteU16(&master_link_status_packet[14], master_link_latest_frame.ambient_lux_x10);
-  OpticalMasterLink_WriteU16(&master_link_status_packet[16], master_link_latest_frame.object_distance_mm);
-  OpticalMasterLink_WriteU16(&master_link_status_packet[18], master_link_latest_frame.snow_height_mm);
-  OpticalMasterLink_WriteU16(&master_link_status_packet[20], master_link_latest_frame.precipitation_level_x10);
-  master_link_status_packet[22] = master_link_latest_frame.precipitation_type;
-  master_link_status_packet[23] = master_link_latest_frame.motion_detected;
-  master_link_status_packet[24] = master_link_latest_frame.package_detected;
-  master_link_status_packet[25] = master_link_latest_frame.presence_detected;
-  master_link_status_packet[26] = master_link_latest_frame.dark_detected;
-  master_link_status_packet[27] = master_link_latest_frame.camera_online;
-  master_link_status_packet[28] = master_link_latest_frame.laser_online;
-  master_link_status_packet[29] = master_link_latest_frame.laser_signal_detected;
-  master_link_status_packet[30] = master_link_latest_frame.tof_range_status;
-  OpticalMasterLink_FinalizePacket(master_link_status_packet, (uint16_t)sizeof(master_link_status_packet));
+  respondToLoaf();
 
-  if (OpticalSensors_HasSnowBaseline() != 0U)
-  {
-    config_flags |= 0x01U;
-  }
-  if (OpticalMasterLink_IsHealthy() != 0U)
-  {
-    config_flags |= 0x02U;
-  }
-  if (OpticalMasterLink_HasRecentActivity() != 0U)
-  {
-    config_flags |= 0x04U;
-  }
+  master_link_config_length = OpticalMasterLink_StoreAsciiPacket(master_link_config_packet,
+                                                                 sizeof(master_link_config_packet),
+                                                                 ">packet:\"config\""
+                                                                 ">timestamp_ms:%lu"
+                                                                 ">snow_baseline_mm:%s"
+                                                                 ">laser_presence_assert_ms:%u"
+                                                                 ">laser_presence_release_ms:%u"
+                                                                 ">laser_motion_hold_ms:%u"
+                                                                 ">laser_profile:\"%s\""
+                                                                 ">sample_period_ms:%u"
+                                                                 ">report_period_ms:%u"
+                                                                 ">health_report_ms:%u"
+                                                                 ">master_link_healthy:%u"
+                                                                 ">master_link_recent:%u\n",
+                                                                 (unsigned long)master_link_latest_frame.timestamp_ms,
+                                                                 OpticalMasterLink_FormatOptionalU16(snow_baseline,
+                                                                                                     sizeof(snow_baseline),
+                                                                                                     runtime_config.snow_baseline_mm),
+                                                                 (unsigned int)runtime_config.laser_presence_assert_ms,
+                                                                 (unsigned int)runtime_config.laser_presence_release_ms,
+                                                                 (unsigned int)runtime_config.laser_motion_hold_ms,
+                                                                 OpticalMasterLink_LaserProfileText(runtime_config.laser_profile),
+                                                                 (unsigned int)OPTICAL_SAMPLE_PERIOD_MS,
+                                                                 (unsigned int)OPTICAL_REPORT_PERIOD_MS,
+                                                                 (unsigned int)OPTICAL_HEALTH_REPORT_MS,
+                                                                 (unsigned int)OpticalMasterLink_IsHealthy(),
+                                                                 (unsigned int)OpticalMasterLink_HasRecentActivity());
 
-  OpticalMasterLink_InitPacket(master_link_config_packet,
-                               (uint16_t)sizeof(master_link_config_packet),
-                               OPTICAL_MASTER_LINK_PKT_CONFIG,
-                               master_link_sequence);
-  OpticalMasterLink_WriteU32(&master_link_config_packet[6], master_link_latest_frame.timestamp_ms);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[10], runtime_config.snow_baseline_mm);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[12], runtime_config.laser_presence_assert_ms);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[14], runtime_config.laser_presence_release_ms);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[16], runtime_config.laser_motion_hold_ms);
-  master_link_config_packet[18] = runtime_config.laser_profile;
-  master_link_config_packet[19] = config_flags;
-  OpticalMasterLink_WriteU16(&master_link_config_packet[20], OPTICAL_SAMPLE_PERIOD_MS);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[22], OPTICAL_REPORT_PERIOD_MS);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[24], OPTICAL_HEALTH_REPORT_MS);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[26], OPTICAL_BH1750_STALE_MS);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[28], OPTICAL_VL53_STALE_MS);
-  OpticalMasterLink_WriteU16(&master_link_config_packet[30], OPTICAL_WONDERCAM_STALE_MS);
-  OpticalMasterLink_FinalizePacket(master_link_config_packet, (uint16_t)sizeof(master_link_config_packet));
-
-  OpticalMasterLink_InitPacket(master_link_diag_packet,
-                               (uint16_t)sizeof(master_link_diag_packet),
-                               OPTICAL_MASTER_LINK_PKT_DIAGNOSTICS,
-                               master_link_sequence);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[6], master_link_latest_frame.timestamp_ms);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[10], master_link_tx_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[14], master_link_rx_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[18], master_link_error_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[22], runtime_diag.bridge_recovery_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[26], runtime_diag.bh1750_stale_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[30], runtime_diag.vl53_stale_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[34], runtime_diag.wondercam_stale_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[38], runtime_diag.wondercam_online_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[42], runtime_diag.health_event_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[46], runtime_diag.fault_event_count);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[50], runtime_diag.last_health_ms);
-  OpticalMasterLink_WriteU32(&master_link_diag_packet[54], runtime_diag.last_fault_ms);
-  master_link_diag_packet[58] = runtime_diag.last_health_code;
-  master_link_diag_packet[59] = runtime_diag.last_fault_code;
-  master_link_diag_packet[60] = runtime_diag.wondercam_raw_class_id;
-  master_link_diag_packet[61] = runtime_diag.wondercam_filtered_class_id;
-  master_link_diag_packet[62] = runtime_diag.wondercam_candidate_streak;
-  master_link_diag_packet[63] = runtime_config.laser_profile;
-  OpticalMasterLink_WriteU16(&master_link_diag_packet[64], runtime_diag.wondercam_conf_x10000);
-  OpticalMasterLink_FinalizePacket(master_link_diag_packet, (uint16_t)sizeof(master_link_diag_packet));
+  master_link_diag_length = OpticalMasterLink_StoreAsciiPacket(master_link_diag_packet,
+                                                               sizeof(master_link_diag_packet),
+                                                               ">packet:\"diagnostics\""
+                                                               ">timestamp_ms:%lu"
+                                                               ">tx_count:%lu"
+                                                               ">rx_count:%lu"
+                                                               ">error_count:%lu"
+                                                               ">bridge_recovery_count:%lu"
+                                                               ">bh1750_stale_count:%lu"
+                                                               ">vl53_stale_count:%lu"
+                                                               ">wondercam_stale_count:%lu"
+                                                               ">wondercam_online_count:%lu"
+                                                               ">health_event_count:%lu"
+                                                               ">fault_event_count:%lu"
+                                                               ">last_health_ms:%lu"
+                                                               ">last_fault_ms:%lu"
+                                                               ">last_health_code:%u"
+                                                               ">last_fault_code:%u"
+                                                               ">wondercam_raw_class_id:%u"
+                                                               ">wondercam_filtered_class_id:%u"
+                                                               ">wondercam_candidate_streak:%u"
+                                                               ">wondercam_conf_x10000:%u\n",
+                                                               (unsigned long)master_link_latest_frame.timestamp_ms,
+                                                               (unsigned long)master_link_tx_count,
+                                                               (unsigned long)master_link_rx_count,
+                                                               (unsigned long)master_link_error_count,
+                                                               (unsigned long)runtime_diag.bridge_recovery_count,
+                                                               (unsigned long)runtime_diag.bh1750_stale_count,
+                                                               (unsigned long)runtime_diag.vl53_stale_count,
+                                                               (unsigned long)runtime_diag.wondercam_stale_count,
+                                                               (unsigned long)runtime_diag.wondercam_online_count,
+                                                               (unsigned long)runtime_diag.health_event_count,
+                                                               (unsigned long)runtime_diag.fault_event_count,
+                                                               (unsigned long)runtime_diag.last_health_ms,
+                                                               (unsigned long)runtime_diag.last_fault_ms,
+                                                               (unsigned int)runtime_diag.last_health_code,
+                                                               (unsigned int)runtime_diag.last_fault_code,
+                                                               (unsigned int)runtime_diag.wondercam_raw_class_id,
+                                                               (unsigned int)runtime_diag.wondercam_filtered_class_id,
+                                                               (unsigned int)runtime_diag.wondercam_candidate_streak,
+                                                               (unsigned int)runtime_diag.wondercam_conf_x10000);
 }
 
 static void OpticalMasterLink_HandleCommand(uint8_t command)
@@ -308,6 +299,63 @@ static void OpticalMasterLink_HandleCommand(uint8_t command)
   }
 
   OpticalMasterLink_RebuildPackets();
+}
+
+void respondToLoaf(void)
+{
+  char ambient_lux[20];
+  char object_distance[20];
+  char snow_height[20];
+  char precip_level[20];
+
+  /*
+   * The shared loaf-side skeleton uses UART, but our upstream transport is
+   * still I2C1 slave mode. We keep the existing I2C callbacks and assemble
+   * the same `>name:value` payload here for the next master read. The
+   * skeleton's LED toggle / HAL_Delay do not fit this interrupt-driven path.
+   */
+  master_link_status_length = OpticalMasterLink_StoreAsciiPacket(master_link_status_packet,
+                                                                 sizeof(master_link_status_packet),
+                                                                 ">packet:\"status\""
+                                                                 ">slice:\"optical\""
+                                                                 ">timestamp_ms:%lu"
+                                                                 ">status_flags:%lu"
+                                                                 ">ambient_lux_x10:%s"
+                                                                 ">object_distance_mm:%s"
+                                                                 ">snow_height_mm:%s"
+                                                                 ">precipitation_level_x10:%s"
+                                                                 ">precipitation_type:\"%s\""
+                                                                 ">motion_detected:%u"
+                                                                 ">package_detected:%u"
+                                                                 ">presence_detected:%u"
+                                                                 ">dark_detected:%u"
+                                                                 ">camera_online:%u"
+                                                                 ">laser_online:%u"
+                                                                 ">laser_signal_detected:%u"
+                                                                 ">tof_range_status:%u\n",
+                                                                 (unsigned long)master_link_latest_frame.timestamp_ms,
+                                                                 (unsigned long)master_link_latest_frame.status_flags,
+                                                                 OpticalMasterLink_FormatOptionalU16(ambient_lux,
+                                                                                                     sizeof(ambient_lux),
+                                                                                                     master_link_latest_frame.ambient_lux_x10),
+                                                                 OpticalMasterLink_FormatOptionalU16(object_distance,
+                                                                                                     sizeof(object_distance),
+                                                                                                     master_link_latest_frame.object_distance_mm),
+                                                                 OpticalMasterLink_FormatOptionalU16(snow_height,
+                                                                                                     sizeof(snow_height),
+                                                                                                     master_link_latest_frame.snow_height_mm),
+                                                                 OpticalMasterLink_FormatOptionalU16(precip_level,
+                                                                                                     sizeof(precip_level),
+                                                                                                     master_link_latest_frame.precipitation_level_x10),
+                                                                 OpticalMasterLink_PrecipTypeText(master_link_latest_frame.precipitation_type),
+                                                                 (unsigned int)master_link_latest_frame.motion_detected,
+                                                                 (unsigned int)master_link_latest_frame.package_detected,
+                                                                 (unsigned int)master_link_latest_frame.presence_detected,
+                                                                 (unsigned int)master_link_latest_frame.dark_detected,
+                                                                 (unsigned int)master_link_latest_frame.camera_online,
+                                                                 (unsigned int)master_link_latest_frame.laser_online,
+                                                                 (unsigned int)master_link_latest_frame.laser_signal_detected,
+                                                                 (unsigned int)master_link_latest_frame.tof_range_status);
 }
 
 /* USER CODE END 0 */
@@ -427,7 +475,6 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* i2cHandle)
 HAL_StatusTypeDef OpticalMasterLink_Init(void)
 {
   memset(&master_link_latest_frame, 0, sizeof(master_link_latest_frame));
-  master_link_sequence = 0U;
   master_link_rx_command = OPTICAL_MASTER_LINK_CMD_STATUS;
   master_link_selected_command = OPTICAL_MASTER_LINK_CMD_STATUS;
   master_link_last_activity_ms = 0U;
@@ -447,7 +494,6 @@ void OpticalMasterLink_UpdateFrame(const optical_slice_frame_t *frame)
   }
 
   master_link_latest_frame = *frame;
-  ++master_link_sequence;
   OpticalMasterLink_RebuildPackets();
 }
 
@@ -470,8 +516,8 @@ uint8_t OpticalMasterLink_HasRecentActivity(void)
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode)
 {
   HAL_StatusTypeDef status;
-  uint8_t *tx_data = master_link_status_packet;
-  uint16_t tx_length = (uint16_t)sizeof(master_link_status_packet);
+  uint8_t *tx_data = (uint8_t *)master_link_status_packet;
+  uint16_t tx_length = master_link_status_length;
 
   (void)AddrMatchCode;
 
@@ -485,19 +531,19 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, ui
     switch (master_link_selected_command)
     {
       case OPTICAL_MASTER_LINK_CMD_CONFIG:
-        tx_data = master_link_config_packet;
-        tx_length = (uint16_t)sizeof(master_link_config_packet);
+        tx_data = (uint8_t *)master_link_config_packet;
+        tx_length = master_link_config_length;
         break;
 
       case OPTICAL_MASTER_LINK_CMD_DIAGNOSTICS:
-        tx_data = master_link_diag_packet;
-        tx_length = (uint16_t)sizeof(master_link_diag_packet);
+        tx_data = (uint8_t *)master_link_diag_packet;
+        tx_length = master_link_diag_length;
         break;
 
       case OPTICAL_MASTER_LINK_CMD_STATUS:
       default:
-        tx_data = master_link_status_packet;
-        tx_length = (uint16_t)sizeof(master_link_status_packet);
+        tx_data = (uint8_t *)master_link_status_packet;
+        tx_length = master_link_status_length;
         break;
     }
 

@@ -1,6 +1,6 @@
 # Calibration And Soak Plan
 
-This note captures the runtime controls and test flow we can use now that the upstream `I2C1` link exposes configuration and diagnostics packets.
+This note captures the runtime controls and test flow we can use now that the upstream `I2C1` link exposes loaf-format ASCII status, configuration, and diagnostics responses.
 
 ## Upstream Address
 
@@ -10,9 +10,9 @@ This note captures the runtime controls and test flow we can use now that the up
 
 These commands are sent as a one-byte write to the optical slice node before any follow-up read.
 
-- `0x00`: select status packet
-- `0x01`: select configuration packet
-- `0x02`: select diagnostics packet
+- `0x00`: select status response
+- `0x01`: select configuration response
+- `0x02`: select diagnostics response
 - `0x10`: capture snow baseline from the current valid `VL53L1X` measurement
 - `0x11`: clear the stored snow baseline
 - `0x20`: select default laser timing profile
@@ -20,7 +20,19 @@ These commands are sent as a one-byte write to the optical slice node before any
 - `0x22`: select stable laser timing profile
 - `0x30`: reset diagnostics counters
 
-## Packet Usage
+## Response Usage
+
+After writing a one-byte command, the master performs an `I2C1` read and receives an ASCII response in this format:
+
+```text
+>VARNAME:VALUE>VARNAME2:VALUE...\n
+```
+
+Current formatting rules:
+
+- numbers are unquoted
+- strings are quoted
+- unavailable numeric readings are emitted as `"unavailable"`
 
 ### Status packet
 
@@ -77,9 +89,9 @@ Recommended flow:
 
 1. mount the optical slice in its final geometry
 2. point the `VL53L1X` at the true zero-snow reference plane
-3. confirm the status packet shows a valid ToF range
+3. confirm the status response shows a valid ToF range
 4. send command `0x10`
-5. read the configuration packet and confirm the baseline field is no longer `0xFFFF`
+5. read the configuration response and confirm `snow_baseline_mm` is no longer `"unavailable"`
 6. confirm live UART output no longer says `Snow uncalibrated`
 
 If the geometry changes, clear and recapture:
@@ -123,11 +135,11 @@ For each case, log:
 - candidate streak
 - online / stale behavior
 
-The diagnostics packet now exposes those fields so we can verify whether misclassification is coming from confidence filtering, class instability, or actual sensor dropout.
+The diagnostics response now exposes those fields so we can verify whether misclassification is coming from confidence filtering, class instability, or actual sensor dropout.
 
 ## Soak Test Targets
 
-Use the diagnostics packet and validation snapshot while running long-duration tests.
+Use the diagnostics response and validation snapshot while running long-duration tests.
 
 Recommended observations:
 

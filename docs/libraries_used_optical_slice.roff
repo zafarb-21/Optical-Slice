@@ -1,0 +1,38 @@
+.pl 11i
+.po 0.6i
+.ll 7.3i
+.ps 10
+.vs 12
+.na
+.ce 1
+\fBLibraries Used In Our Optical Slice Project\fP
+.sp 1
+\fBPlatform libraries\fP
+.sp 0.4
+\(bu \fBSTM32F3xx HAL\fP: Main hardware abstraction layer for GPIO, SPI, I2C, UART, EXTI, clocks, power, and interrupt support. We use it to initialize peripherals and control the board without writing raw register code everywhere.
+.sp 0.3
+\(bu \fBCMSIS\fP: ARM Cortex-M support layer that provides device headers, startup definitions, interrupt definitions, and low-level core access used under the HAL.
+.sp 0.3
+\(bu \fBSTM32CubeIDE generated project structure\fP: Project framework that generated the startup files, peripheral init files, linker/build layout, and base STM32 application structure.
+.sp 0.8
+\fBSensor library\fP
+.sp 0.4
+\(bu \fBST VL53L1X ULD (STSW-IMG009)\fP: Official ST Ultra Lite Driver for the VL53L1X time-of-flight sensor. We use it to boot-check the sensor, initialize ranging, set timing and distance mode, poll for ready data, read distance, read range status, and clear interrupts.
+.sp 0.8
+\fBCustom project drivers and modules\fP
+.sp 0.4
+\(bu \fBsc18is604\fP: Our driver for the SC18IS604 SPI-to-I2C bridge. It lets the STM32 reach BH1750, VL53L1X, and WonderCam on the downstream sensor bus.
+.sp 0.3
+\(bu \fBvl53l1x_bridge / vl53l1_platform\fP: Our bridge-safe wrapper around the ST VL53L1X library. It adapts the ULD driver so VL53L1X transactions work through the SC18IS604 path.
+.sp 0.3
+\(bu \fBoptical_slice_sensors\fP: Sensor acquisition layer. It polls BH1750, VL53L1X, WonderCam, and the laser path, and derives dark, snow, presence, motion, and obstruction states.
+.sp 0.3
+\(bu \fBoptical_slice_app\fP: Top-level application layer. It prepares the live state, prints USART2 diagnostics, and coordinates runtime reporting.
+.sp 0.3
+\(bu \fBi2c\fP: Upstream I2C1 slave-link module. It formats the optical slice status, configuration, and diagnostics responses in loaf-style ASCII for the master board.
+.sp 0.3
+\(bu \fBoptical_slice_validation\fP: Bench-check helper module. It creates validation snapshots and formatted reports for bring-up and testing.
+.sp 0.8
+\fBShort exam line\fP
+.sp 0.4
+Our project uses STM32 HAL and CMSIS for MCU control, the ST VL53L1X ULD for the ToF sensor, and custom firmware modules for the SC18IS604 bridge, sensor fusion, upstream I2C response export, and validation.

@@ -71,7 +71,7 @@ At the current state, the firmware does all of the following:
 - filters camera classifications by confidence and stability before changing the reported precipitation/package state
 - exposes a compact 3-line `USART2` live report that fits typical serial terminals
 - emits periodic health reports over `USART2`
-- exposes the latest frame to the upstream board over `I2C1` as a slave packet at address `0x42`
+- exposes the latest frame to the upstream board over `I2C1` as a slave response at address `0x42`
 
 ## Current Sensor Status
 
@@ -86,7 +86,7 @@ At the current state, the firmware does all of the following:
 - laser TX/RX GPIO path
 - presence/motion detection from the laser path
 - `USART2` structured boot, health, live, and fault output
-- upstream `I2C1` slave link with packetized status, config, and diagnostics transfer
+- upstream `I2C1` slave link with loaf-format ASCII status, config, and diagnostics transfer
 
 ### Integrated but still bench-sensitive
 
@@ -128,36 +128,35 @@ Laser <Y/N> | Pres <Y/N> | Mot <Y/N> | Pkg <Yes/No/Unk> | Prec <state> | Cam <On
 
 That format is meant for bring-up and operator visibility on the serial console without horizontal wrapping.
 
-## Upstream I2C1 Master-Link Packet
+## Upstream I2C1 Master-Link Response
 
-`I2C1` is now configured as the optical slice node's upstream slave interface. The current firmware listens at `0x42` and serves three packet views selected by single-byte commands:
+`I2C1` is now configured as the optical slice node's upstream slave interface. The current firmware listens at `0x42` and serves three ASCII response views selected by single-byte commands:
 
-- status packet
-- configuration packet
-- diagnostics packet
+- status response
+- configuration response
+- diagnostics response
 
-The status packet includes:
+Each response uses the loaf-requested assignment format:
 
-- packet header bytes `0xA5 0x5A`
-- protocol version
-- packet type
-- payload length
-- sequence number
-- timestamp
-- `status_flags`
-- ambient light
-- ToF distance
-- snow height
-- precipitation level and type
-- motion / package / presence / dark state
-- camera status
-- laser status and laser-signal state
-- ToF range status
-- CRC16
+```text
+>VARNAME:VALUE>VARNAME2:VALUE...\n
+```
 
-The configuration packet includes runtime baseline and laser timing state. The diagnostics packet includes master-link counters, bridge recovery counters, stale counters, and recent health/fault tracking.
+Current implementation details:
 
-The packet assembly lives in `Core/Src/i2c.c`. The current control model uses single-byte commands for packet selection, baseline capture/clear, laser profile selection, and diagnostics reset.
+- each field starts with `>`
+- numeric values are sent without quotes
+- string values are sent with double quotes
+- unavailable `uint16_t` readings are sent as `"unavailable"`
+- the current status response begins with fields such as `>packet:"status">slice:"optical"...`
+
+The three views currently export:
+
+- status: live optical frame values such as timestamp, `status_flags`, ambient light, ToF distance, snow height, precipitation state, motion, package, presence, dark, camera, laser, and ToF range status
+- configuration: runtime baseline, laser timing/profile state, sample/report timing, and master-link health/activity flags
+- diagnostics: upstream TX/RX/error counters, bridge recovery counters, stale counters, health/fault tracking, and recent `WonderCam` classifier details
+
+The response assembly lives in `Core/Src/i2c.c`. The control model still uses single-byte commands for view selection, baseline capture/clear, laser profile selection, and diagnostics reset.
 
 ## VL53L1X Bridge Note
 
@@ -212,7 +211,7 @@ The project is well past basic bring-up, but a few areas still matter if we want
 
 - bench-validate `WonderCam` behavior across the actual snow / ice / package cases we care about
 - extend the upstream protocol beyond the current single-byte control model if we later need arbitrary configuration writes instead of command-based presets
-- use the new upstream diagnostics packet and validation report during longer-duration soak testing for bridge recovery, camera freshness, and ToF freshness edge cases
+- use the new upstream diagnostics response and validation report during longer-duration soak testing for bridge recovery, camera freshness, and ToF freshness edge cases
 - choose the final laser timing profile on the installed hardware after beam alignment and environmental testing
 - confirm that the fixed `1500 mm` zero-snow reference and `1000 mm` obstruction threshold match the final installed mechanical geometry
 
@@ -220,7 +219,7 @@ The project is well past basic bring-up, but a few areas still matter if we want
 
 - `Core/Src/optical_slice_app.c`: top-level app logic and `USART2` reporting
 - `Core/Src/optical_slice_sensors.c`: sensor bring-up, polling, freshness, and derived-state logic
-- `Core/Src/i2c.c`: upstream `I2C1` slave link and packet assembly
+- `Core/Src/i2c.c`: upstream `I2C1` slave link and loaf-format ASCII response assembly
 - `Core/Src/vl53l1x_bridge.c`: `VL53L1X` bridge-backed ranging layer
 - `Core/Src/sc18is604.c`: SPI-to-I2C bridge driver
 - `Core/Src/optical_slice_validation.c`: bench validation helpers

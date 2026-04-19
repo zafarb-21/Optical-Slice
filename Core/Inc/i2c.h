@@ -46,6 +46,7 @@ HAL_StatusTypeDef OpticalMasterLink_Init(void);
 void OpticalMasterLink_UpdateFrame(const optical_slice_frame_t *frame);
 uint8_t OpticalMasterLink_IsHealthy(void);
 uint8_t OpticalMasterLink_HasRecentActivity(void);
+void respondToLoaf(void);
 
 /* USER CODE END Prototypes */
 

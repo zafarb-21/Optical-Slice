@@ -1,6 +1,6 @@
 # Technical Understanding Of Our Project Portion: Optical Slice
 
-This document is a technical breakdown of the optical slice portion of the project as it exists in this repo today. It focuses on the firmware architecture, the libraries we rely on, the hardware layout, the current packet / connection path, and how interrupts are actually being used.
+This document is a technical breakdown of the optical slice portion of the project as it exists in this repo today. It focuses on the firmware architecture, the libraries we rely on, the hardware layout, the current response / connection path, and how interrupts are actually being used.
 
 ## 1. What The Optical Slice Is
 
@@ -120,9 +120,9 @@ The optical slice hardware is organized into three communication regions:
 - `VL53L1X` default address: `0x29`
 - `WonderCam` default address: `0x32`
 
-## 4. Packet Structure / Connection Path
+## 4. Response Structure / Connection Path
 
-This section describes how information moves through the optical slice. We now have a working connection path, an internal software frame, and an implemented upstream `I2C1` slave packet interface for status, configuration, and diagnostics.
+This section describes how information moves through the optical slice. We now have a working connection path, an internal software frame, and an implemented upstream `I2C1` slave response interface for status, configuration, and diagnostics.
 
 ### A. Sensor communication path
 
@@ -140,7 +140,7 @@ The laser path is separate:
 
 `STM32 GPIO -> laser TX / laser RX`
 
-This means the laser front end is not packetized over I2C at all. It is read and driven directly through GPIO logic in the MCU.
+This means the laser front end is not exported through the upstream I2C response layer at all. It is read and driven directly through GPIO logic in the MCU.
 
 ### B. Internal software frame
 
@@ -164,11 +164,11 @@ The frame currently carries:
 - `laser_signal_detected`
 - `tof_range_status`
 
-This is effectively the current in-memory packet for the optical slice application.
+This is effectively the current in-memory exported frame for the optical slice application.
 
 ### C. Runtime reporting path
 
-The application publishes a human-readable ASCII report over `USART2`, and it also maintains a packetized upstream interface on `I2C1`.
+The application publishes a human-readable ASCII report over `USART2`, and it also maintains a loaf-format ASCII upstream interface on `I2C1`.
 
 Current runtime output includes:
 
@@ -189,17 +189,18 @@ The `LIVE` report summarizes:
 - precipitation classification
 - camera online / offline status
 
-This UART path is for bring-up and debugging. The master-board-facing exported packet path now lives on `I2C1`.
+This UART path is for bring-up and debugging. The master-board-facing exported response path now lives on `I2C1`.
 
 ### D. Upstream master-board connection status
 
-`I2C1` is configured as the master-board-facing slave interface and now serves packetized state to the upstream controller.
+`I2C1` is configured as the master-board-facing slave interface and now serves loaf-format ASCII state to the upstream controller.
 
 At the current stage:
 
 - the STM32 listens at `0x42` as a 7-bit slave
-- the upstream side can read a status packet, a configuration packet, or a diagnostics packet
-- the upstream side can issue single-byte commands to select packets, capture or clear the snow baseline, choose a laser timing profile, and reset diagnostics
+- the upstream side can read a status response, a configuration response, or a diagnostics response
+- each response uses the format `>VARNAME:VALUE>VARNAME2:VALUE...\n`
+- the upstream side can issue single-byte commands to select responses, capture or clear the snow baseline, choose a laser timing profile, and reset diagnostics
 
 ## 5. Bus Configuration Details
 
