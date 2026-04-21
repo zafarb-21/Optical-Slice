@@ -29,8 +29,11 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
+#include "optical_slice_types.h"
 
 /* USER CODE END Includes */
+
+extern UART_HandleTypeDef huart1;
 
 extern UART_HandleTypeDef huart2;
 
@@ -38,9 +41,15 @@ extern UART_HandleTypeDef huart2;
 
 /* USER CODE END Private defines */
 
+void MX_USART1_UART_Init(void);
 void MX_USART2_UART_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+HAL_StatusTypeDef OpticalMasterLink_Init(void);
+void OpticalMasterLink_UpdateFrame(const optical_slice_frame_t *frame);
+uint8_t OpticalMasterLink_IsHealthy(void);
+uint8_t OpticalMasterLink_HasRecentActivity(void);
+void respondToLoaf(void);
 
 /* USER CODE END Prototypes */
 

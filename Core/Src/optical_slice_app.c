@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "i2c.h"
 #include "optical_slice_config.h"
 #include "sc18is604.h"
 #include "optical_slice_sensors.h"
@@ -439,11 +438,11 @@ void OpticalSlice_Init(void)
   (void)OpticalSensors_Init();
   if (OpticalMasterLink_Init() == HAL_OK)
   {
-    OpticalSlice_UartPrint("BOOT | I2C1 addr=0x%02X listen=ok\r\n", OPTICAL_MASTER_LINK_ADDR_7BIT);
+    OpticalSlice_UartPrint("BOOT | USART1 master link=ok\r\n");
   }
   else
   {
-    OpticalSlice_UartPrint("FAULT | I2C1 addr=0x%02X listen start failed\r\n", OPTICAL_MASTER_LINK_ADDR_7BIT);
+    OpticalSlice_UartPrint("FAULT | USART1 master link start failed\r\n");
   }
   if (OpticalMasterLink_IsHealthy() != 0U)
   {

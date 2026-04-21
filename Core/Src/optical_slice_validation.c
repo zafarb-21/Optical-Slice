@@ -2,9 +2,8 @@
 
 #include <stdio.h>
 #include <string.h>
-
-#include "i2c.h"
 #include "optical_slice_sensors.h"
+#include "usart.h"
 
 static void OpticalValidation_SetFlag(uint32_t *pass_flags, uint32_t *fail_flags, uint32_t flag, uint8_t passed)
 {

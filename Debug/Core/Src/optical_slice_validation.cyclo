@@ -1,3 +1,3 @@
 ../Core/Src/optical_slice_validation.c:8:13:OpticalValidation_SetFlag	2
-../Core/Src/optical_slice_validation.c:22:19:OpticalValidation_RunSnapshot	4
-../Core/Src/optical_slice_validation.c:75:5:OpticalValidation_FormatReport	4
+../Core/Src/optical_slice_validation.c:22:19:OpticalValidation_RunSnapshot	2
+../Core/Src/optical_slice_validation.c:92:5:OpticalValidation_FormatReport	4

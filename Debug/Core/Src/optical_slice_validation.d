@@ -30,7 +30,8 @@ Core/Src/optical_slice_validation.o: \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_spi_ex.h \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart.h \
  ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart_ex.h \
- ../Core/Inc/optical_slice_types.h ../Core/Inc/optical_slice_sensors.h
+ ../Core/Inc/optical_slice_types.h ../Core/Inc/optical_slice_sensors.h \
+ ../Core/Inc/usart.h
 ../Core/Inc/optical_slice_validation.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal.h:
@@ -64,3 +65,4 @@ Core/Src/optical_slice_validation.o: \
 ../Drivers/STM32F3xx_HAL_Driver/Inc/stm32f3xx_hal_uart_ex.h:
 ../Core/Inc/optical_slice_types.h:
 ../Core/Inc/optical_slice_sensors.h:
+../Core/Inc/usart.h:
