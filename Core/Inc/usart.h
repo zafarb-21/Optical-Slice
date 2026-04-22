@@ -44,13 +44,15 @@ extern UART_HandleTypeDef huart2;
 void MX_USART1_UART_Init(void);
 void MX_USART2_UART_Init(void);
 
+
+
 /* USER CODE BEGIN Prototypes */
 HAL_StatusTypeDef OpticalMasterLink_Init(void);
 void OpticalMasterLink_UpdateFrame(const optical_slice_frame_t *frame);
 uint8_t OpticalMasterLink_IsHealthy(void);
 uint8_t OpticalMasterLink_HasRecentActivity(void);
 void respondToLoaf(void);
-
+void OpticalMasterLink_ProcessByte(char *buffer, size_t len);
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

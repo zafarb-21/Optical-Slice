@@ -20,15 +20,17 @@
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
 
+
 /* USER CODE BEGIN 0 */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "optical_slice_config.h"
 #include "optical_slice_sensors.h"
 
-#define OPTICAL_MASTER_LINK_SLOT_ID            0x03U
+#define OPTICAL_MASTER_LINK_SLOT_ID            0x03
 #define OPTICAL_MASTER_LINK_RX_CMD_LEN         64U
 #define OPTICAL_MASTER_LINK_STATUS_PACKET_LEN  384U
 #define OPTICAL_MASTER_LINK_CONFIG_PACKET_LEN  320U
@@ -59,6 +61,9 @@ static uint32_t master_link_error_count;
 static optical_master_link_view_t master_link_selected_view = OPTICAL_MASTER_LINK_VIEW_STATUS;
 static char master_link_command[OPTICAL_MASTER_LINK_RX_CMD_LEN];
 static uint8_t master_link_command_length;
+
+#define RX_BUFFER_SIZEs 1024
+char rxBuffers[RX_BUFFER_SIZEs];
 
 static const char *OpticalMasterLink_PrecipTypeText(uint8_t precip_type)
 {
@@ -133,7 +138,7 @@ static HAL_StatusTypeDef OpticalMasterLink_EnableReceive(void)
 {
   HAL_StatusTypeDef status;
 
-  status = HAL_UART_Receive_IT(&huart1, &master_link_rx_byte, 1U);
+  status = HAL_UART_Receive_DMA(&huart1, &master_link_rx_byte, 1U);
   master_link_rx_enabled = (uint8_t)(status == HAL_OK);
   return status;
 }
@@ -335,59 +340,67 @@ static void OpticalMasterLink_HandleCommand(const char *command)
   }
 }
 
-static void OpticalMasterLink_ProcessByte(uint8_t byte)
+void OpticalMasterLink_ProcessByte(char *buffer, size_t len)
 {
-  if (master_link_waiting_for_slot_id != 0U)
-  {
-    master_link_waiting_for_slot_id = 0U;
-    if (byte == OPTICAL_MASTER_LINK_SLOT_ID)
+    char cmd[RX_BUFFER_SIZEs];
+    size_t cmdIndex = 0;
+    bool inCommand = false;
+
+    for (size_t i = 0; i < len; i++)
     {
-      ++master_link_rx_count;
-      master_link_last_activity_ms = HAL_GetTick();
-      respondToLoaf();
+        char c = buffer[i];
+
+        if (c == 0x99 && i + 1 < len && buffer[i + 1] == OPTICAL_MASTER_LINK_SLOT_ID) // If the loaf is requesting a packet from this slice
+        {
+            respondToLoaf();
+            buffer[i] = '\0'; // Clear processed command
+            buffer[i + 1] = '\0';
+            i++;
+        }
+        else if (c == '>')
+        {
+            // If we were already building a command, finalize it
+            if (inCommand && cmdIndex > 0)
+            {
+                cmd[cmdIndex] = '\0';
+                //processCommand(cmd);
+                cmdIndex = 0;
+            }
+
+            // Start a new command
+            inCommand = true;
+            buffer[i] = '\0'; // Clear processed command
+        }
+        else if (c == '\n')
+        {
+            // End of packet — flush any active command
+            if (inCommand && cmdIndex > 0)
+            {
+                cmd[cmdIndex] = '\0';
+                //processCommand(cmd);
+            }
+
+            // Reset state
+            inCommand = false;
+            cmdIndex = 0;
+            buffer[i] = '\0'; // Clear processed command
+        }
+        else if (inCommand)
+        {
+            // Accumulate command characters safely
+            if (cmdIndex < (RX_BUFFER_SIZEs - 1))
+            {
+                cmd[cmdIndex++] = c;
+                buffer[i] = '\0'; // Clear processed command
+            }
+            else
+            {
+                // Overflow protection: discard oversized command
+                cmdIndex = 0;
+                inCommand = false;
+            }
+        }
     }
-    return;
-  }
-
-  if (byte == 0x99U)
-  {
-    master_link_waiting_for_slot_id = 1U;
-    return;
-  }
-
-  if (byte == '>')
-  {
-    master_link_command_length = 0U;
-    return;
-  }
-
-  if (byte == '\r')
-  {
-    return;
-  }
-
-  if (byte == '\n')
-  {
-    if (master_link_command_length != 0U)
-    {
-      master_link_command[master_link_command_length] = '\0';
-      ++master_link_rx_count;
-      master_link_last_activity_ms = HAL_GetTick();
-      OpticalMasterLink_HandleCommand(master_link_command);
-      master_link_command_length = 0U;
-    }
-    return;
-  }
-
-  if (master_link_command_length < (OPTICAL_MASTER_LINK_RX_CMD_LEN - 1U))
-  {
-    master_link_command[master_link_command_length++] = (char)byte;
-  }
-  else
-  {
-    master_link_command_length = 0U;
-    ++master_link_error_count;
-  }
 }
 
 /* USER CODE END 0 */
@@ -627,36 +640,49 @@ uint8_t OpticalMasterLink_HasRecentActivity(void)
 
 void respondToLoaf(void)
 {
-  const char *tx_data = master_link_status_packet;
-  uint16_t tx_length = master_link_status_length;
+  const char *response= master_link_status_packet;
+  //uint16_t tx_length = master_link_status_length;
 
   OpticalMasterLink_RebuildPackets();
 
   switch (master_link_selected_view)
   {
     case OPTICAL_MASTER_LINK_VIEW_CONFIG:
-      tx_data = master_link_config_packet;
-      tx_length = master_link_config_length;
+    	response = master_link_config_packet;
+      //tx_length = master_link_config_length;
       break;
 
     case OPTICAL_MASTER_LINK_VIEW_DIAGNOSTICS:
-      tx_data = master_link_diag_packet;
-      tx_length = master_link_diag_length;
+    	response = master_link_diag_packet;
+      //tx_length = master_link_diag_length;
       break;
 
     case OPTICAL_MASTER_LINK_VIEW_STATUS:
     default:
-      tx_data = master_link_status_packet;
-      tx_length = master_link_status_length;
+    	response = master_link_status_packet;
+//      tx_length = master_link_status_length;
       break;
   }
 
-  if ((tx_length == 0U) ||
-      (HAL_UART_Transmit(&huart1, (uint8_t *)tx_data, tx_length, HAL_MAX_DELAY) != HAL_OK))
-  {
-    ++master_link_error_count;
-    return;
-  }
+  // Take control of TX bus
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  // Transmit response
+  HAL_Delay(5); // Give pin time to settle
+  HAL_UART_Transmit(&huart1, (uint8_t *)response, strlen(response), HAL_MAX_DELAY);
+  HAL_Delay(1);
+
+  // Set PB6 back to GPIO input (hi-Z) after transmission to relinquish TX bus
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   ++master_link_tx_count;
   master_link_last_activity_ms = HAL_GetTick();
@@ -664,13 +690,11 @@ void respondToLoaf(void)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if (huart != &huart1)
-  {
-    return;
-  }
-
-  OpticalMasterLink_ProcessByte(master_link_rx_byte);
-  (void)OpticalMasterLink_EnableReceive();
+    if (huart->Instance == USART1) {
+        // Process the received data in rxBuffer
+        // Restart DMA reception
+        HAL_UART_Receive_DMA(&huart1, (uint8_t *)rxBuffers, RX_BUFFER_SIZEs);
+    }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)

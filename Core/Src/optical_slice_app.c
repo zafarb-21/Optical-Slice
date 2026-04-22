@@ -20,6 +20,9 @@ static volatile uint8_t sc18_irq_pending;
 #define OPTICAL_VL53_IDENT_REG       0x010FU
 #define OPTICAL_REPORT_DEBOUNCE_MS   100U
 
+#define RX_BUFFER_SIZE 1024
+char rxBuffer[RX_BUFFER_SIZE];
+
 static uint8_t OpticalSlice_ReadLaserRaw(void)
 {
   return (uint8_t)((HAL_GPIO_ReadPin(LASER_RX_GPIO_Port, LASER_RX_Pin) == GPIO_PIN_SET) ? 1U : 0U);
@@ -540,6 +543,7 @@ void OpticalSlice_Run(void)
   {
     last_report_ms = now;
     OpticalSlice_ReportFrame();
+    OpticalMasterLink_ProcessByte(rxBuffer, RX_BUFFER_SIZE);
   }
 
   if ((last_health_report_ms == 0U) ||
@@ -548,6 +552,8 @@ void OpticalSlice_Run(void)
     last_health_report_ms = now;
     OpticalSlice_ReportHealth();
   }
+
+
 }
 
 const optical_slice_frame_t *OpticalSlice_GetLatestFrame(void)
